@@ -1,6 +1,4 @@
 import io
-import json
-import os
 import re
 import tarfile
 from pathlib import Path
@@ -10,9 +8,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title='Derated + Arduino Cloud', layout='wide')
+st.set_page_config(page_title='Derated + Arduino + Plot', layout='wide')
 
 PAIR_RE = re.compile(r'^(RX|TX|INF)_(\d{4})\.(CSV|TML)$', re.IGNORECASE)
+
 
 # -----------------------------
 # Shared helpers
@@ -71,7 +70,7 @@ def read_source_uploaded(uploaded_file, selected_suffix=None):
             raise ValueError('No complete RX/TX pairs found in this TAR file.')
         suffix = selected_suffix or complete[0]
         if suffix not in mapping:
-            raise ValueError(f'Suffix {suffix} was not found in the TAR file.')
+            raise ValueError(f'Suffix {suffix} was not found in this TAR file.')
         entry = mapping[suffix]
         with tarfile.open(fileobj=io.BytesIO(file_bytes), mode='r') as tf:
             rx_df = read_csv_from_tar(tf, entry['RX'])
@@ -286,12 +285,238 @@ def generate_derate_artifacts(data, power_col, ignore_seconds, end_window_sec, t
     return fig, pd.DataFrame([summary]), curve, end_df[['Time_sec', 'ChamberTemp', power_col]].copy()
 
 
+def friendly_label(col):
+    return 'TxTemp (DC-DC)' if col == 'TxTemp' else 'TxAmbTemp (PA)' if col == 'TxAmbTemp' else col
+
+
+def get_plot_columns(df):
+    cols = []
+    for c in df.columns:
+        if c == 'Time_sec':
+            continue
+        if pd.to_numeric(df[c], errors='coerce').notna().sum() > 0:
+            cols.append(c)
+    return cols
+
+
+def apply_preset(columns, preset):
+    p = preset.lower()
+    if p == 'clear':
+        return []
+    if p == 'temp':
+        return [c for c in columns if 'temp' in c.lower()]
+    if p == 'voltage':
+        return [c for c in columns if any(k in c.lower() for k in ['vbat', 'vpa', 'vmon', 'vcharge', 'vrect', 'volt'])]
+    if p == 'power':
+        return [c for c in columns if 'power' in c.lower() or 'efficiency' in c.lower() or 'loss' in c.lower()]
+    if p == 'rx':
+        return [c for c in columns if c.startswith('Rx')]
+    if p == 'tx':
+        return [c for c in columns if c.startswith('Tx')]
+    if p == 'recommended':
+        preferred = {'RxTemp', 'TxTemp', 'RxVBatt', 'RxPower', 'TxPaPower', 'WirelessEfficiency', 'TempDelta'}
+        return [c for c in columns if c in preferred]
+    return []
+
+
+def smooth_series(series, mode, window):
+    mode = (mode or 'None').strip().lower()
+    window = max(1, int(window or 1))
+    if mode == 'none':
+        return series
+    if mode == 'moving average':
+        return series.rolling(window=window, min_periods=1).mean()
+    if mode == 'median':
+        return series.rolling(window=window, min_periods=1).median()
+    if mode == 'ema':
+        return series.ewm(span=window, adjust=False).mean()
+    return series
+
+
+def get_time_axis_values(time_sec, mode):
+    mode = (mode or 'Seconds').strip().lower()
+    time_sec = pd.to_numeric(time_sec, errors='coerce')
+    if mode == 'seconds':
+        return time_sec.to_numpy(dtype=float), 'Time (seconds)'
+    if mode == 'minutes':
+        return (time_sec / 60.0).to_numpy(dtype=float), 'Time (minutes)'
+    if mode == 'hours':
+        return (time_sec / 3600.0).to_numpy(dtype=float), 'Time (hours)'
+    return np.arange(len(time_sec), dtype=float), 'Sample index'
+
+
+def compute_stats_text(df, selected_columns, scale_map):
+    rows = []
+    for col in selected_columns:
+        s = pd.to_numeric(df[col], errors='coerce').dropna()
+        if s.empty:
+            continue
+        scaled = s * float(scale_map.get(col, 1.0))
+        rows.append({
+            'signal': col,
+            'min': float(scaled.min()),
+            'max': float(scaled.max()),
+            'avg': float(scaled.mean()),
+            'delta': float(scaled.max() - scaled.min()),
+            'std': float(scaled.std() if len(scaled) > 1 else 0.0),
+        })
+    return pd.DataFrame(rows)
+
+
+def render_plot_tab():
+    st.subheader('Plot')
+    st.caption('This tab follows the style of your plot_v5 app, but only for plotting in Streamlit.')
+
+    left, right = st.columns([1.05, 1.35])
+
+    with left:
+        plot_file = st.file_uploader('Plot CSV/TAR', type=['csv', 'tar'], key='plot_file')
+        plot_suffix = None
+        if plot_file is not None and plot_file.name.lower().endswith('.tar'):
+            try:
+                plot_suffix_options = sorted([s for s, entry in scan_tar_bytes(plot_file.getvalue()).items() if 'RX' in entry and 'TX' in entry])
+                plot_suffix = st.selectbox('RX/TX pair', plot_suffix_options, index=0, key='plot_suffix')
+            except Exception as e:
+                st.error(f'Could not inspect TAR: {e}')
+
+        plot_title = st.text_input('Plot title', value='Data Plot', key='plot_title_input')
+        signal_filter = st.text_input('Signal filter', value='', key='plot_signal_filter').strip().lower()
+
+        c1, c2 = st.columns(2)
+        smoothing_mode = c1.selectbox('Smoothing', ['None', 'Moving Average', 'Median', 'EMA'], index=0, key='plot_smoothing')
+        x_axis_mode = c2.selectbox('X axis', ['Seconds', 'Minutes', 'Hours', 'Sample Index'], index=0, key='plot_xaxis')
+
+        c3, c4 = st.columns(2)
+        smoothing_window = c3.number_input('Window', min_value=1, value=5, step=1, key='plot_window')
+        ignore_seconds = c4.number_input('Ignore first sec', min_value=0.0, value=60.0, step=10.0, key='plot_ignore')
+
+    prepared_df = None
+    source_caption = None
+    all_plot_cols = []
+
+    if plot_file is not None:
+        try:
+            raw_df, source_type, chosen_suffix = read_source_uploaded(plot_file, plot_suffix)
+            prepared_df = prepare_loaded_dataframe(raw_df)
+            all_plot_cols = get_plot_columns(prepared_df)
+            source_caption = f"Loaded {plot_file.name} | source={source_type}" + (f" | pair={chosen_suffix}" if chosen_suffix else '')
+            st.caption(source_caption)
+        except Exception as e:
+            st.error(f'Failed to load plot file: {e}')
+
+    with right:
+        if prepared_df is None:
+            st.info('Upload a CSV or TAR file to use the Plot tab.')
+            return
+
+        filtered_cols = [c for c in all_plot_cols if signal_filter in c.lower()]
+        if not filtered_cols:
+            st.warning('No numeric signals match the current filter.')
+            return
+
+        st.write('Preset selection')
+        p1, p2, p3, p4, p5, p6, p7 = st.columns(7)
+        if p1.button('Recommended', key='preset_rec'):
+            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Recommended')
+        if p2.button('Temp', key='preset_temp'):
+            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Temp')
+        if p3.button('Voltage', key='preset_volt'):
+            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Voltage')
+        if p4.button('Power', key='preset_power'):
+            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Power')
+        if p5.button('Rx', key='preset_rx'):
+            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Rx')
+        if p6.button('Tx', key='preset_tx'):
+            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Tx')
+        if p7.button('Clear', key='preset_clear'):
+            st.session_state['plot_selected_columns'] = []
+
+        default_selection = st.session_state.get('plot_selected_columns')
+        valid_default = [c for c in (default_selection or []) if c in filtered_cols]
+        if not valid_default:
+            valid_default = [c for c in apply_preset(filtered_cols, 'Recommended') if c in filtered_cols]
+
+        selected_columns = st.multiselect(
+            'Signals to plot',
+            options=filtered_cols,
+            default=valid_default,
+            format_func=friendly_label,
+            key='plot_selected_columns'
+        )
+
+        st.write('Scale factors')
+        scale_map = {}
+        show_cols = selected_columns[:24]
+        more_count = max(0, len(selected_columns) - len(show_cols))
+        grid_cols = st.columns(3)
+        for i, col in enumerate(show_cols):
+            scale_map[col] = grid_cols[i % 3].number_input(
+                f'{col} scale',
+                value=1.0,
+                step=0.1,
+                format='%.3f',
+                key=f'scale_{col}'
+            )
+        if more_count:
+            st.caption(f'{more_count} more selected signals are using scale 1.0 and are hidden to keep the page manageable.')
+        for col in selected_columns[24:]:
+            scale_map[col] = 1.0
+
+        if not selected_columns:
+            st.warning('Select one or more signals to plot.')
+            return
+
+        filtered_df = prepared_df.copy()
+        filtered_df['Time_sec'] = pd.to_numeric(filtered_df['Time_sec'], errors='coerce')
+        filtered_df = filtered_df[filtered_df['Time_sec'] > float(ignore_seconds)].copy()
+        if filtered_df.empty:
+            st.warning('No rows remain after the ignore-first-seconds filter.')
+            return
+
+        x_data, x_label = get_time_axis_values(filtered_df['Time_sec'], x_axis_mode)
+        fig = plt.figure(figsize=(11.5, 6.2))
+        ax = fig.add_subplot(111)
+        export_df = pd.DataFrame({'Time_sec': filtered_df['Time_sec'].reset_index(drop=True)})
+
+        for col in selected_columns:
+            y_data = pd.to_numeric(filtered_df[col], errors='coerce') * float(scale_map.get(col, 1.0))
+            y_data = smooth_series(y_data, smoothing_mode, smoothing_window)
+            valid = y_data.notna()
+            if valid.sum() == 0:
+                continue
+            ax.plot(x_data[valid.to_numpy()], y_data[valid], label=f'{col} (Scale: {float(scale_map.get(col, 1.0))})', linewidth=0.9)
+            avg_value = float(y_data[valid].mean())
+            ax.axhline(y=avg_value, linestyle='--', linewidth=0.7, alpha=0.6)
+            export_df[col] = (pd.to_numeric(filtered_df[col], errors='coerce') * float(scale_map.get(col, 1.0))).reset_index(drop=True)
+            export_df[f'{col}_smoothed'] = y_data.reset_index(drop=True)
+
+        ax.set_xlabel(x_label)
+        ax.set_ylabel('Value')
+        ax.set_title(plot_title)
+        ax.grid(True, alpha=0.45)
+        ax.legend(fontsize=8, ncol=2)
+        fig.tight_layout()
+        st.pyplot(fig, clear_figure=False)
+
+        stats_df = compute_stats_text(filtered_df, selected_columns, scale_map)
+        cstats1, cstats2 = st.columns([1, 1])
+        cstats1.dataframe(stats_df, use_container_width=True, height=260)
+        preview_cols = ['Time_sec'] + selected_columns[:6]
+        cstats2.dataframe(filtered_df[preview_cols].head(250), use_container_width=True, height=260)
+
+        png_bytes = io.BytesIO()
+        fig.savefig(png_bytes, format='png', dpi=150, bbox_inches='tight')
+        png_bytes.seek(0)
+        st.download_button('Download plot PNG', png_bytes.getvalue(), file_name='plot.png', mime='image/png')
+        st.download_button('Download filtered CSV', export_df.to_csv(index=False).encode('utf-8'), file_name='filtered_plot_data.csv', mime='text/csv')
+
+
 # -----------------------------
 # UI
 # -----------------------------
-st.title('Derated + Arduino Cloud')
+st.title('Derated + Arduino + Plot')
 
-derate_tab, arduino_tab = st.tabs(['Derated', 'Arduino'])
+derate_tab, arduino_tab, plot_tab = st.tabs(['Derated', 'Arduino', 'Plot'])
 
 with derate_tab:
     st.subheader('Derate report')
@@ -411,3 +636,6 @@ with arduino_tab:
             st.error(f'Failed to load Arduino CSV: {e}')
     else:
         st.info('Upload an Arduino Cloud CSV to use this tab.')
+
+with plot_tab:
+    render_plot_tab()

@@ -1058,6 +1058,51 @@ def render_jabil_editor():
             st.error(f'Failed to build Jabil labels: {e}')
 
 
+
+
+def _workspace_intro(title, subtitle):
+    st.markdown(f"### {title}")
+    if subtitle:
+        st.caption(subtitle)
+
+
+def _metric_cards(items):
+    cols = st.columns(len(items)) if items else []
+    for col, item in zip(cols, items):
+        if len(item) == 3:
+            label, value, help_text = item
+        elif len(item) == 2:
+            label, value = item
+            help_text = None
+        else:
+            label = str(item)
+            value = ''
+            help_text = None
+        col.metric(label, value, help=help_text)
+
+def render_app_header():
+    st.markdown(
+        f"""
+        <div class="wibotic-watermark"></div>
+        <div class="wibotic-hero">
+            <div class="wibotic-hero__logo">
+                <img src="data:image/png;base64,{LOGO_B64}" alt="Wibotic logo" />
+            </div>
+            <h1 class="wibotic-hero__title">Wibotic Tools Dashboard</h1>
+            <p class="wibotic-hero__subtitle">Derating analysis, Arduino temperature review, plotting, labels, and RF calculations in one polished workspace.</p>
+            <div class="wibotic-badges">
+                <span class="wibotic-badge">Derate</span>
+                <span class="wibotic-badge">Arduino</span>
+                <span class="wibotic-badge">Plot</span>
+                <span class="wibotic-badge">Label</span>
+                <span class="wibotic-badge">RF Calculator</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_workspace_selector():
     options = ['Derate Reports', 'Arduino Viewer', 'Plot Explorer', 'Label Studio', 'RF Calculator']
     selected = st.radio(
@@ -1483,409 +1528,75 @@ def bank_capacitance_calculate(bank1_vals_pf, bank2_vals_pf, output_unit='pF', t
     return result
 
 
-def render_rf_tab():
-    st.subheader('RF Calculator')
-    st.caption('Capacitance-bank and RF resonance tools in one place.')
-
-    left, right = st.columns([1.05, 1.0], gap='large')
-
-    with left:
-        st.markdown('#### RF resonance')
-        st.caption('Fill any two fields. The third value is calculated automatically.')
-        rf1, rf2, rf3 = st.columns(3)
-        freq_mhz = rf1.number_input('Frequency (MHz)', min_value=0.0, value=0.0, step=0.1, format='%.3f', key='rf_freq_mhz')
-        inductance_uh = rf2.number_input('Inductance (µH)', min_value=0.0, value=0.0, step=0.1, format='%.3f', key='rf_inductance_uh')
-        capacitance_pf = rf3.number_input('Capacitance (pF)', min_value=0.0, value=0.0, step=0.1, format='%.3f', key='rf_capacitance_pf')
-
-        if st.button('Calculate RF resonance', use_container_width=True, key='rf_calc_btn'):
-            try:
-                result = rf_resonance_calculate(
-                    freq_mhz=freq_mhz if freq_mhz > 0 else None,
-                    inductance_uh=inductance_uh if inductance_uh > 0 else None,
-                    capacitance_pf=capacitance_pf if capacitance_pf > 0 else None,
-                )
-                st.session_state['rf_result'] = result
-                st.session_state.pop('rf_error', None)
-            except Exception as e:
-                st.session_state['rf_error'] = str(e)
-
-        if st.session_state.get('rf_error'):
-            st.error(st.session_state['rf_error'])
-        if st.session_state.get('rf_result'):
-            res = st.session_state['rf_result']
-            c1, c2, c3 = st.columns(3)
-            c1.metric('Frequency', f"{res['frequency_mhz']:.3f} MHz")
-            c2.metric('Inductance', f"{res['inductance_uh']:.3f} µH")
-            c3.metric('Capacitance', f"{res['capacitance_pf']:.3f} pF")
-
-    with right:
-        st.markdown('#### Capacitor banks')
-        st.caption('Two capacitor banks in parallel, then both banks in series.')
-        unit = st.selectbox('Output unit', ['pF', 'µF'], index=0, key='cap_bank_unit')
-        tolerance = st.number_input('Tolerance (%)', min_value=0.0, value=0.0, step=0.5, format='%.2f', key='cap_bank_tol')
-
-        b1, b2 = st.columns(2, gap='large')
-        bank1 = []
-        bank2 = []
-        with b1:
-            st.markdown('##### Bank 1')
-            for name in ['C11', 'C12', 'C13', 'C14', 'C15']:
-                bank1.append(st.number_input(f'{name} (pF)', min_value=0.0, value=0.0, step=0.1, format='%.2f', key=f'cap_{name.lower()}'))
-        with b2:
-            st.markdown('##### Bank 2')
-            for name in ['C6', 'C7', 'C8', 'C9', 'C10']:
-                bank2.append(st.number_input(f'{name} (pF)', min_value=0.0, value=0.0, step=0.1, format='%.2f', key=f'cap_{name.lower()}'))
-
-        if st.button('Calculate bank capacitance', use_container_width=True, key='cap_bank_calc_btn'):
-            st.session_state['cap_bank_result'] = bank_capacitance_calculate(bank1, bank2, output_unit=unit, tolerance_pct=tolerance)
-
-        if st.session_state.get('cap_bank_result'):
-            res = st.session_state['cap_bank_result']
-            c1, c2, c3 = st.columns(3)
-            c1.metric('Bank 1', f"{res['bank1']:.3f} {res['unit']}")
-            c2.metric('Bank 2', f"{res['bank2']:.3f} {res['unit']}")
-            c3.metric('Total', f"{res['total']:.3f} {res['unit']}")
-            if 'min_total' in res:
-                st.info(f"Tolerance range: {res['min_total']:.3f} to {res['max_total']:.3f} {res['unit']}")
+COIL_PRESETS = {
+    "215-000086 rev C — RC-1K Loop": {
+        "part_number": "215-000086 rev C",
+        "coil_name": "RC-1K Loop",
+        "topology": "single_parallel",
+        "bank1_label": "Single parallel bank",
+        "bank2_label": "Not used",
+        "bank1": ["C1", "C2", "C3", "C4", "C5", "C6", "C7"],
+        "bank2": [],
+        "notes": "All populated capacitors are in parallel. In your reference sheet, Bank 2 is marked with x to indicate this single-bank parallel build.",
+    },
+    "215-000091 rev B — TC-1K-G2 Loop": {
+        "part_number": "215-000091 rev B",
+        "coil_name": "TC-1K-G2 Loop",
+        "topology": "single_parallel",
+        "bank1_label": "Single parallel bank",
+        "bank2_label": "Not used",
+        "bank1": ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9"],
+        "bank2": [],
+        "notes": "All populated capacitors are in parallel. Use this for the loop build where one effective bank sets the total tuning capacitance.",
+    },
+    "215-000092 rev C — TC-1K Tank": {
+        "part_number": "215-000092 rev C",
+        "coil_name": "TC-1K Tank",
+        "topology": "two_parallel_series",
+        "bank1_label": "Bank 1 (parallel)",
+        "bank2_label": "Bank 2 (parallel)",
+        "bank1": ["C9", "C10", "C11", "C12", "C13"],
+        "bank2": ["C4", "C5", "C6", "C7", "C8"],
+        "notes": "C9 through C13 form one parallel bank. C4 through C8 form the second parallel bank. The two banks are then in series.",
+    },
+}
 
 
-def render_app_header():
-    st.markdown(
-        f"""
-        <div class="wibotic-hero">
-            <div class="wibotic-hero__logo">
-                <img src="data:image/png;base64,{LOGO_B64}" alt="Wibotic logo" />
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+def coil_preset_capacitance_calculate(preset_name, cap_map_pf, output_unit='pF', tolerance_pct=None):
+    preset = COIL_PRESETS[preset_name]
+    bank1_pf = sum(float(cap_map_pf.get(ref, 0) or 0) for ref in preset['bank1'])
+    bank2_pf = sum(float(cap_map_pf.get(ref, 0) or 0) for ref in preset['bank2']) if preset['bank2'] else 0.0
 
+    if preset['topology'] == 'single_parallel':
+        total_pf = bank1_pf
+    else:
+        total_pf = 0.0 if bank1_pf <= 0 or bank2_pf <= 0 else (bank1_pf * bank2_pf) / (bank1_pf + bank2_pf)
 
-
-# ===== UI refresh overrides =====
-def _workspace_intro(title, subtitle):
-    st.markdown(f"""
-    <div style='padding:0.2rem 0 0.9rem 0;'>
-      <div style='font-size:1.45rem;font-weight:800;color:#0f172a;margin-bottom:0.18rem;'>{title}</div>
-      <div style='color:#5b6472;font-size:0.96rem;'>{subtitle}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-
-def _metric_cards(items):
-    cols = st.columns(len(items))
-    for col, (label, value, delta) in zip(cols, items):
-        with col:
-            st.metric(label, value, delta)
-
-
-def _show_upload_validation(uploaded_file, parser=None, label='CSV'):
-    if uploaded_file is None:
-        st.info(f'Upload a {label} file to continue.')
-        return None, None
-    try:
-        uploaded_file.seek(0)
-    except Exception:
-        pass
-    detected = None
-    parsed = None
-    parse_error = None
-    try:
-        detected = pd.read_csv(uploaded_file, nrows=5)
-        cols = detected.columns.tolist()
-        st.success(f'{label} loaded. Detected {len(cols)} columns.')
-        with st.expander('Detected columns', expanded=False):
-            st.write(cols)
-    except Exception as e:
-        st.warning(f'Could not inspect {label} columns: {e}')
-    if parser is not None:
-        try:
-            try:
-                uploaded_file.seek(0)
-            except Exception:
-                pass
-            parsed = parser(uploaded_file)
-        except Exception as e:
-            parse_error = str(e)
-            st.error(f'Validation failed: {parse_error}')
-    return parsed, parse_error
-
-
-def _build_vertical_sheet(previews, background='#f4f6f8', gap=16):
-    if not previews:
-        return None
-    width = max(img.width for img in previews)
-    height = sum(img.height for img in previews) + gap * (len(previews) - 1)
-    sheet = Image.new('RGB', (width, height), background)
-    y = 0
-    for img in previews:
-        sheet.paste(img, (0, y))
-        y += img.height + gap
-    return sheet
-
-
-def render_workspace_selector():
-    options = ['Derate Reports', 'Arduino Viewer', 'Plot Explorer', 'Label Studio', 'RF Calculator']
-    labels = {
-        'Derate Reports': 'Derate',
-        'Arduino Viewer': 'Arduino',
-        'Plot Explorer': 'Plot',
-        'Label Studio': 'Label',
-        'RF Calculator': 'RF Calculator',
+    div = 1e6 if output_unit == 'µF' else 1.0
+    result = {
+        'bank1_pf': bank1_pf,
+        'bank2_pf': bank2_pf,
+        'total_pf': total_pf,
+        'bank1': bank1_pf / div,
+        'bank2': bank2_pf / div,
+        'total': total_pf / div,
+        'unit': output_unit,
+        'topology': preset['topology'],
+        'populated_bank1': [ref for ref in preset['bank1'] if float(cap_map_pf.get(ref, 0) or 0) > 0],
+        'populated_bank2': [ref for ref in preset['bank2'] if float(cap_map_pf.get(ref, 0) or 0) > 0],
     }
-    selected = st.radio(
-        'Workspace',
-        options,
-        index=options.index(st.session_state.get('active_workspace', 'Plot Explorer')) if st.session_state.get('active_workspace', 'Plot Explorer') in options else 0,
-        horizontal=True,
-        key='active_workspace',
-        label_visibility='collapsed',
-        format_func=lambda x: labels.get(x, x),
-    )
-    return selected
-
-
-def render_nabtesco_editor():
-    _workspace_intro('Nabtesco labels', 'Upload a shipment CSV, validate the fields, tune the layout, preview the result, then export the PDF.')
-    editor_col, preview_col = st.columns([0.95, 1.35], gap='large')
-    with editor_col:
-        _render_nabtesco_help(st.session_state.get('nabtesco_csv'))
-        st.markdown('#### Setup')
-        label_csv = st.file_uploader('Shipment CSV', type=['csv'], key='nabtesco_csv')
-        sales_order = st.text_input('Sales Order', key='nabtesco_sales_order')
-        customer_po = st.text_input('Customer Purchase Order', key='nabtesco_customer_po')
-        preset = st.radio('Label size preset', ['4.00 × 2.32', '6.00 × 2.32', 'Custom'], horizontal=True, key='nab_size_preset_ui')
-        preset_map = {'4.00 × 2.32': (4.0, 2.32), '6.00 × 2.32': (6.0, 2.32)}
-
-        parsed_df, parse_error = _show_upload_validation(label_csv, parser=parse_nabtesco_labels, label='Shipment CSV')
-
-        def labeled_number(label, key, value, min_value=None, step=None, fmt=None):
-            lcol, wcol = st.columns([0.92, 1.18], gap='small')
-            with lcol:
-                st.markdown(f"<div style='padding-top:0.45rem;font-weight:600;color:#445066'>{label}</div>", unsafe_allow_html=True)
-            with wcol:
-                if key not in st.session_state:
-                    st.session_state[key] = value
-                kwargs = dict(label=label, key=key, label_visibility='collapsed')
-                if min_value is not None: kwargs['min_value']=min_value
-                if step is not None: kwargs['step']=step
-                if fmt is not None: kwargs['format']=fmt
-                return st.number_input(**kwargs)
-
-        custom_size = preset == 'Custom'
-        if custom_size:
-            label_width = labeled_number('Label width', 'nab_custom_width_v8', 4.0, min_value=1.0, step=0.1, fmt='%.2f')
-            label_height = labeled_number('Label height', 'nab_custom_height_v8', 2.32, min_value=1.0, step=0.01, fmt='%.2f')
-        else:
-            label_width, label_height = preset_map[preset]
-            st.caption(f'Using preset size: {label_width:.2f} in × {label_height:.2f} in')
-
-        st.markdown('#### Layout tuning')
-        font_size = labeled_number('Font size', 'nab_font_size_v8', 10, min_value=6, step=1)
-        x_offset = labeled_number('Text X offset', 'nab_x_offset_v8', 0.0, step=0.02, fmt='%.2f')
-        y_offset = labeled_number('Text Y offset', 'nab_y_offset_v8', 0.0, step=0.02, fmt='%.2f')
-        line_spacing = labeled_number('Line spacing', 'nab_line_spacing_v8', 0.30, min_value=0.15, step=0.01, fmt='%.2f')
-        logo_scale = labeled_number('Logo scale', 'nab_logo_scale_v8', 1.0, min_value=0.2, step=0.1, fmt='%.1f')
-        preview_count = int(labeled_number('Page preview count', 'nab_preview_count_num_v8', 3, min_value=1, step=1))
-
-    with preview_col:
-        st.markdown('#### Live preview')
-        if label_csv is None:
-            st.info('Upload a CSV to open the preview.')
-            return
-        if parse_error or parsed_df is None:
-            st.warning('Fix the CSV validation issue on the left to enable the preview.')
-            return
-        labels_df = parsed_df
-        settings = _label_settings_dict(label_width, label_height, font_size, x_offset, y_offset, line_spacing, logo_scale)
-        _metric_cards([
-            ('Rows loaded', f'{len(labels_df)}', None),
-            ('Pattern', 'Nabtesco', None),
-            ('PDF ready', 'Yes' if sales_order.strip() and customer_po.strip() else 'Needs SO/PO', None),
-        ])
-        preview_choice = st.radio('Preview mode', ['Single label', 'Page view'], horizontal=True, key='nab_preview_mode_v8')
-        first_label = labels_df.iloc[0].to_dict()
-        if preview_choice == 'Single label':
-            st.image(build_label_preview_image(first_label, sales_order.strip(), customer_po.strip(), settings, scale=2), use_container_width=True)
-        else:
-            st.image(build_page_preview_image(labels_df, sales_order.strip(), customer_po.strip(), settings, max_labels=preview_count, scale=1), use_container_width=True)
-        with st.expander('Parsed label data', expanded=False):
-            st.dataframe(labels_df, use_container_width=True, height=260)
-        if sales_order.strip() and customer_po.strip():
-            pdf_bytes = build_label_pdf(labels_df, sales_order.strip(), customer_po.strip(), settings)
-            st.download_button('Download label PDF', pdf_bytes, file_name='nabtesco_labels.pdf', mime='application/pdf', use_container_width=True)
-        else:
-            st.info('Enter Sales Order and Customer Purchase Order to enable the PDF export.')
-
-
-def render_jabil_editor():
-    _workspace_intro('Jabil labels', 'Upload the Jabil CSV, confirm the fields, preview the generated labels, and export the final 6 × 4 PDF.')
-    editor_col, preview_col = st.columns([0.95, 1.35], gap='large')
-    with editor_col:
-        _render_jabil_help(st.session_state.get('jabil_csv'))
-        st.markdown('#### Setup')
-        label_csv = st.file_uploader('Shipment CSV', type=['csv'], key='jabil_csv')
-        sales_order = st.text_input('Sales Order', key='jabil_sales_order')
-        customer_po = st.text_input('Customer Purchase Order', key='jabil_customer_po')
-        date_code = st.text_input('Date Code', key='jabil_date_code')
-        parsed_df, parse_error = _show_upload_validation(label_csv, parser=parse_jabil_labels, label='Shipment CSV')
-        st.markdown('#### Layout tuning')
-        logo_scale = st.slider('Logo scale', min_value=0.2, max_value=2.0, value=1.0, step=0.1, key='jabil_logo_scale_v8')
-        preview_count = st.slider('Page preview count', min_value=1, max_value=8, value=3, step=1, key='jabil_preview_count_num_v8')
-        st.caption('Fixed label size: 6.00 in × 4.00 in')
-
-    with preview_col:
-        st.markdown('#### Live preview')
-        if label_csv is None:
-            st.info('Upload a CSV to open the Jabil preview.')
-            return
-        if parse_error or parsed_df is None:
-            st.warning('Fix the CSV validation issue on the left to enable the preview.')
-            return
-        labels_df = parsed_df
-        settings = _label_settings_dict(6.0, 4.0, 10, 0.0, 0.0, 0.30, logo_scale)
-        _metric_cards([
-            ('Rows loaded', f'{len(labels_df)}', None),
-            ('Pattern', 'Jabil', None),
-            ('PDF ready', 'Yes' if sales_order.strip() and customer_po.strip() else 'Needs SO/PO', None),
-        ])
-        preview_choice = st.radio('Preview mode', ['Single label', 'Page view'], horizontal=True, key='jabil_preview_mode_v8')
-        first_label = labels_df.iloc[0].to_dict()
-        if preview_choice == 'Single label':
-            st.image(build_jabil_preview_image(first_label, sales_order.strip(), customer_po.strip(), settings, date_code=date_code.strip(), scale=2), use_container_width=True)
-        else:
-            previews = [build_jabil_preview_image(row, sales_order.strip(), customer_po.strip(), settings, date_code=date_code.strip(), scale=1) for row in labels_df.head(preview_count).to_dict(orient='records')]
-            st.image(_build_vertical_sheet(previews), use_container_width=True)
-        with st.expander('Parsed label data', expanded=False):
-            st.dataframe(labels_df, use_container_width=True, height=260)
-        if sales_order.strip() and customer_po.strip():
-            pdf_bytes = build_jabil_pdf(labels_df, sales_order.strip(), customer_po.strip(), settings, date_code=date_code.strip())
-            st.download_button('Download Jabil label PDF', pdf_bytes, file_name='jabil_labels.pdf', mime='application/pdf', use_container_width=True)
-        else:
-            st.info('Enter Sales Order and Customer Purchase Order to enable the final PDF export.')
-
-
-def render_label_tab():
-    _workspace_intro('Label Studio', 'Customer-specific label tools with inline help, CSV validation, preview-first workflow, and PDF export.')
-    tab_nab, tab_jabil = st.tabs(['Nabtesco', 'Jabil'])
-    with tab_nab:
-        render_nabtesco_editor()
-    with tab_jabil:
-        render_jabil_editor()
-
-
-def render_plot_tab():
-    _workspace_intro('Plot Explorer', 'Use TAR file from Wibotic Transmitter log. Choose a pair, apply a signal preset, inspect the plot, then export filtered data.')
-    left, right = st.columns([0.95, 1.35], gap='large')
-    prepared_df = None
-    all_plot_cols = []
-    plot_file = None
-    plot_suffix = None
-    with left:
-        with st.expander('Help', expanded=False):
-            st.write('Use TAR file from Wibotic Transmitter log.')
-            st.write('You can also upload a CSV. After loading, pick a preset or choose signals manually.')
-        plot_file = st.file_uploader('Plot CSV/TAR', type=['csv', 'tar'], key='plot_file_v8')
-        if plot_file is not None and plot_file.name.lower().endswith('.tar'):
-            try:
-                plot_suffix_options = sorted([s for s, entry in scan_tar_bytes(plot_file.getvalue()).items() if 'RX' in entry and 'TX' in entry])
-                if plot_suffix_options:
-                    plot_suffix = st.selectbox('RX/TX pair', plot_suffix_options, index=0, key='plot_suffix_v8')
-            except Exception as e:
-                st.error(f'Could not inspect TAR: {e}')
-        plot_title = st.text_input('Plot title', value='Data Plot', key='plot_title_input_v8')
-        signal_filter = st.text_input('Signal filter', value='', key='plot_signal_filter_v8').strip().lower()
-        c1, c2 = st.columns(2)
-        smoothing_mode = c1.selectbox('Smoothing', ['None', 'Moving Average', 'Median', 'EMA'], index=0, key='plot_smoothing_v8')
-        x_axis_mode = c2.selectbox('X axis', ['Seconds', 'Minutes', 'Hours', 'Sample Index'], index=0, key='plot_xaxis_v8')
-        c3, c4 = st.columns(2)
-        smoothing_window = c3.number_input('Window', min_value=1, value=5, step=1, key='plot_window_v8')
-        ignore_seconds = c4.number_input('Ignore first sec', min_value=0.0, value=60.0, step=10.0, key='plot_ignore_v8')
-
-    if plot_file is not None:
-        try:
-            raw_df, source_type, chosen_suffix = read_source_uploaded(plot_file, plot_suffix)
-            prepared_df = prepare_loaded_dataframe(raw_df)
-            all_plot_cols = get_plot_columns(prepared_df)
-            _metric_cards([
-                ('Source', source_type.upper(), None),
-                ('Signals', f'{len(all_plot_cols)}', None),
-                ('Rows', f'{len(prepared_df):,}', None),
-            ])
-            st.caption(f"Loaded {plot_file.name}" + (f" | pair={chosen_suffix}" if chosen_suffix else ''))
-        except Exception as e:
-            st.error(f'Failed to load plot file: {e}')
-
-    with right:
-        if prepared_df is None:
-            st.info('Upload a CSV or TAR file to use the Plot tab.')
-            return
-        filtered_cols = [c for c in all_plot_cols if signal_filter in c.lower()]
-        if not filtered_cols:
-            st.warning('No numeric signals match the current filter.')
-            return
-        st.markdown('#### Quick presets')
-        p1, p2, p3, p4, p5, p6, p7 = st.columns(7)
-        if p1.button('Recommended', key='preset_rec_v8', use_container_width=True):
-            st.session_state['plot_selected_columns_v8'] = apply_preset(filtered_cols, 'Recommended')
-        if p2.button('Temp', key='preset_temp_v8', use_container_width=True):
-            st.session_state['plot_selected_columns_v8'] = apply_preset(filtered_cols, 'Temp')
-        if p3.button('Voltage', key='preset_volt_v8', use_container_width=True):
-            st.session_state['plot_selected_columns_v8'] = apply_preset(filtered_cols, 'Voltage')
-        if p4.button('Power', key='preset_power_v8', use_container_width=True):
-            st.session_state['plot_selected_columns_v8'] = apply_preset(filtered_cols, 'Power')
-        if p5.button('Rx', key='preset_rx_v8', use_container_width=True):
-            st.session_state['plot_selected_columns_v8'] = apply_preset(filtered_cols, 'Rx')
-        if p6.button('Tx', key='preset_tx_v8', use_container_width=True):
-            st.session_state['plot_selected_columns_v8'] = apply_preset(filtered_cols, 'Tx')
-        if p7.button('Clear', key='preset_clear_v8', use_container_width=True):
-            st.session_state['plot_selected_columns_v8'] = []
-        default_selection = st.session_state.get('plot_selected_columns_v8')
-        valid_default = [c for c in (default_selection or []) if c in filtered_cols]
-        if not valid_default:
-            valid_default = [c for c in apply_preset(filtered_cols, 'Recommended') if c in filtered_cols]
-        selected_columns = st.multiselect('Signals to plot', options=filtered_cols, default=valid_default, format_func=friendly_label, key='plot_selected_columns_v8')
-        if not selected_columns:
-            st.warning('Select at least one signal to draw the chart.')
-            return
-        _metric_cards([
-            ('Selected signals', f'{len(selected_columns)}', None),
-            ('X axis', x_axis_mode, None),
-            ('Smoothing', smoothing_mode, None),
-        ])
-        plot_df = prepared_df.copy()
-        x_values, x_label = choose_x_axis_series(plot_df, x_axis_mode)
-        scale_cols = st.columns(min(4, len(selected_columns)))
-        scale_map = {}
-        for idx, col_name in enumerate(selected_columns):
-            target_col = scale_cols[idx % len(scale_cols)]
-            with target_col:
-                scale_map[col_name] = st.number_input(f'{friendly_label(col_name)} scale', min_value=0.001, value=1.0, step=0.1, key=f'plot_scale_v8_{col_name}')
-        fig = plt.figure(figsize=(11.5, 5.8))
-        ax = fig.add_subplot(111)
-        filtered_df = plot_df.copy()
-        if 'TimeSec' in filtered_df.columns and ignore_seconds > 0:
-            filtered_df = filtered_df[filtered_df['TimeSec'] >= ignore_seconds].copy()
-            x_values, x_label = choose_x_axis_series(filtered_df, x_axis_mode)
-        for col_name in selected_columns:
-            y = pd.to_numeric(filtered_df[col_name], errors='coerce') * float(scale_map.get(col_name, 1.0))
-            y = apply_smoothing(y, smoothing_mode, int(smoothing_window))
-            ax.plot(x_values, y, linewidth=1.25, label=friendly_label(col_name))
-        ax.set_title(plot_title)
-        ax.set_xlabel(x_label)
-        ax.grid(True, alpha=0.35)
-        ax.legend(fontsize=8, ncol=2)
-        st.pyplot(fig, clear_figure=False)
-        export_df = filtered_df[['TimeSec'] + selected_columns].copy() if 'TimeSec' in filtered_df.columns else filtered_df[selected_columns].copy()
-        st.download_button('Download filtered CSV', export_df.to_csv(index=False).encode('utf-8'), file_name='plot_filtered.csv', mime='text/csv', use_container_width=True)
-        with st.expander('Preview data', expanded=False):
-            st.dataframe(export_df.head(500), use_container_width=True, height=260)
+    if tolerance_pct is not None and tolerance_pct > 0:
+        tol = result['total'] * (tolerance_pct / 100.0)
+        result['min_total'] = result['total'] - tol
+        result['max_total'] = result['total'] + tol
+    return result
 
 
 def render_rf_tab():
-    _workspace_intro('RF Calculator', 'Capacitance-bank and RF resonance tools with quick presets and result cards for common lab work.')
-    left, right = st.columns([1.05, 1.0], gap='large')
-    with left:
+    _workspace_intro('RF Calculator', 'Capacitance-bank and RF resonance tools with quick presets, coil-aware bank topology, and result cards for common lab work.')
+
+    top_left, top_right = st.columns([1.0, 1.25], gap='large')
+    with top_left:
         st.markdown('#### RF resonance')
         preset_cols = st.columns(4)
         presets = [('13.56 MHz', 13.56, None, None), ('6.78 MHz', 6.78, None, None), ('125 kHz', 0.125, None, None), ('Clear', 0.0, 0.0, 0.0)]
@@ -1894,13 +1605,18 @@ def render_rf_tab():
                 st.session_state['rf_freq_mhz_v8'] = fval or 0.0
                 st.session_state['rf_inductance_uh_v8'] = lval or 0.0
                 st.session_state['rf_capacitance_pf_v8'] = cval or 0.0
+
         rf1, rf2, rf3 = st.columns(3)
         freq_mhz = rf1.number_input('Frequency (MHz)', min_value=0.0, value=float(st.session_state.get('rf_freq_mhz_v8', 0.0)), step=0.1, format='%.3f', key='rf_freq_mhz_v8')
         inductance_uh = rf2.number_input('Inductance (µH)', min_value=0.0, value=float(st.session_state.get('rf_inductance_uh_v8', 0.0)), step=0.1, format='%.3f', key='rf_inductance_uh_v8')
         capacitance_pf = rf3.number_input('Capacitance (pF)', min_value=0.0, value=float(st.session_state.get('rf_capacitance_pf_v8', 0.0)), step=0.1, format='%.3f', key='rf_capacitance_pf_v8')
         if st.button('Calculate RF resonance', use_container_width=True, key='rf_calc_btn_v8'):
             try:
-                st.session_state['rf_result_v8'] = rf_resonance_calculate(freq_mhz=freq_mhz if freq_mhz > 0 else None, inductance_uh=inductance_uh if inductance_uh > 0 else None, capacitance_pf=capacitance_pf if capacitance_pf > 0 else None)
+                st.session_state['rf_result_v8'] = rf_resonance_calculate(
+                    freq_mhz=freq_mhz if freq_mhz > 0 else None,
+                    inductance_uh=inductance_uh if inductance_uh > 0 else None,
+                    capacitance_pf=capacitance_pf if capacitance_pf > 0 else None,
+                )
                 st.session_state.pop('rf_error_v8', None)
             except Exception as e:
                 st.session_state['rf_error_v8'] = str(e)
@@ -1913,32 +1629,112 @@ def render_rf_tab():
                 ('Inductance', f"{res['inductance_uh']:.3f} µH", None),
                 ('Capacitance', f"{res['capacitance_pf']:.3f} pF", None),
             ])
-    with right:
-        st.markdown('#### Capacitor banks')
-        unit = st.selectbox('Output unit', ['pF', 'µF'], index=0, key='cap_bank_unit_v8')
-        tolerance = st.number_input('Tolerance (%)', min_value=0.0, value=0.0, step=0.5, format='%.2f', key='cap_bank_tol_v8')
-        b1, b2 = st.columns(2, gap='large')
-        bank1, bank2 = [], []
-        with b1:
-            st.markdown('##### Bank 1')
-            for name in ['C11', 'C12', 'C13', 'C14', 'C15']:
-                bank1.append(st.number_input(f'{name} (pF)', min_value=0.0, value=0.0, step=0.1, format='%.2f', key=f'cap_v8_{name.lower()}'))
-        with b2:
-            st.markdown('##### Bank 2')
-            for name in ['C6', 'C7', 'C8', 'C9', 'C10']:
-                bank2.append(st.number_input(f'{name} (pF)', min_value=0.0, value=0.0, step=0.1, format='%.2f', key=f'cap_v8_{name.lower()}'))
-        if st.button('Calculate bank capacitance', use_container_width=True, key='cap_bank_calc_btn_v8'):
-            st.session_state['cap_bank_result_v8'] = bank_capacitance_calculate(bank1, bank2, output_unit=unit, tolerance_pct=tolerance)
-        if st.session_state.get('cap_bank_result_v8'):
-            res = st.session_state['cap_bank_result_v8']
-            _metric_cards([
-                ('Bank 1', f"{res['bank1']:.3f} {res['unit']}", None),
-                ('Bank 2', f"{res['bank2']:.3f} {res['unit']}", None),
-                ('Total', f"{res['total']:.3f} {res['unit']}", None),
-            ])
+
+    with top_right:
+        st.markdown('#### Coil presets')
+        with st.expander('Help', expanded=False):
+            st.write('Choose a preset coil, enter the populated capacitor values by reference designator, and the app will calculate the effective bank and total capacitance based on the coil topology.')
+            st.write('For the single-bank builds, the x marks in your reference sheet mean the build acts as one parallel bank. For the tank build, Bank 1 and Bank 2 are parallel internally and then placed in series.')
+
+        preset_name = st.selectbox('Reference designator / coil preset', list(COIL_PRESETS.keys()), key='rf_coil_preset_v10')
+        preset = COIL_PRESETS[preset_name]
+        st.caption(f"{preset['part_number']} | {preset['coil_name']}")
+        _metric_cards([
+            ('Topology', 'Single parallel bank' if preset['topology'] == 'single_parallel' else 'Two parallel banks in series', None),
+            ('Bank 1 refs', ', '.join(preset['bank1']), None),
+            ('Bank 2 refs', ', '.join(preset['bank2']) if preset['bank2'] else 'Not used', None),
+        ])
+        st.info(preset['notes'])
+
+        setting_col1, setting_col2, setting_col3 = st.columns(3)
+        preset_unit = setting_col1.selectbox('Result unit', ['pF', 'µF'], index=0, key='coil_bank_unit_v10')
+        preset_tolerance = setting_col2.number_input('Tolerance (%)', min_value=0.0, value=0.0, step=0.5, format='%.2f', key='coil_bank_tol_v10')
+        preset_l_uh = setting_col3.number_input('Inductance (µH)', min_value=0.0, value=float(st.session_state.get('coil_preset_l_v10', 0.0)), step=0.1, format='%.3f', key='coil_preset_l_v10')
+        target_freq_mhz = st.number_input('Target frequency (MHz) optional', min_value=0.0, value=float(st.session_state.get('coil_target_freq_v10', 0.0)), step=0.01, format='%.3f', key='coil_target_freq_v10')
+
+        input_col, preview_col = st.columns([1.15, 0.85], gap='large')
+        cap_map = {}
+        with input_col:
+            if preset['bank2']:
+                bank_col1, bank_col2 = st.columns(2, gap='large')
+                with bank_col1:
+                    st.markdown(f"##### {preset['bank1_label']}")
+                    for ref in preset['bank1']:
+                        cap_map[ref] = st.number_input(f'{ref} (pF)', min_value=0.0, value=float(st.session_state.get(f'coilcap::{preset_name}::{ref}', 0.0)), step=0.1, format='%.2f', key=f'coilcap::{preset_name}::{ref}')
+                with bank_col2:
+                    st.markdown(f"##### {preset['bank2_label']}")
+                    for ref in preset['bank2']:
+                        cap_map[ref] = st.number_input(f'{ref} (pF)', min_value=0.0, value=float(st.session_state.get(f'coilcap::{preset_name}::{ref}', 0.0)), step=0.1, format='%.2f', key=f'coilcap::{preset_name}::{ref}')
+            else:
+                st.markdown('##### Single parallel bank')
+                for ref in preset['bank1']:
+                    cap_map[ref] = st.number_input(f'{ref} (pF)', min_value=0.0, value=float(st.session_state.get(f'coilcap::{preset_name}::{ref}', 0.0)), step=0.1, format='%.2f', key=f'coilcap::{preset_name}::{ref}')
+
+            if st.button('Calculate preset coil capacitance', type='primary', use_container_width=True, key='coil_bank_calc_btn_v10'):
+                try:
+                    res = coil_preset_capacitance_calculate(preset_name, cap_map, output_unit=preset_unit, tolerance_pct=preset_tolerance)
+                    st.session_state['coil_bank_result_v10'] = res
+                    st.session_state['coil_bank_result_name_v10'] = preset_name
+                    st.session_state.pop('coil_bank_error_v10', None)
+                    if preset_l_uh > 0 and res['total_pf'] > 0:
+                        st.session_state['coil_resonance_v10'] = rf_resonance_calculate(inductance_uh=preset_l_uh, capacitance_pf=res['total_pf'])
+                    else:
+                        st.session_state.pop('coil_resonance_v10', None)
+                    if target_freq_mhz > 0 and preset_l_uh > 0:
+                        st.session_state['coil_target_result_v10'] = rf_resonance_calculate(freq_mhz=target_freq_mhz, inductance_uh=preset_l_uh)
+                    else:
+                        st.session_state.pop('coil_target_result_v10', None)
+                except Exception as e:
+                    st.session_state['coil_bank_error_v10'] = str(e)
+
+        with preview_col:
+            st.markdown('##### Preset summary')
+            st.write(f"**Part number:** {preset['part_number']}")
+            st.write(f"**Coil:** {preset['coil_name']}")
+            st.write(f"**Topology:** {'Single parallel bank' if preset['topology'] == 'single_parallel' else 'Two parallel banks in series'}")
+            st.write(f"**Bank 1:** {', '.join(preset['bank1'])}")
+            st.write(f"**Bank 2:** {', '.join(preset['bank2']) if preset['bank2'] else 'Not used'}")
+            populated_refs = [ref for ref, val in cap_map.items() if float(val) > 0]
+            st.write(f"**Populated refs entered:** {', '.join(populated_refs) if populated_refs else 'None yet'}")
+            if preset['topology'] == 'single_parallel':
+                st.caption('This preset acts as one parallel bank. Enter only the populated capacitor values.')
+            else:
+                st.caption('Each bank is parallel internally. Bank 1 and Bank 2 are then combined in series.')
+
+        if st.session_state.get('coil_bank_error_v10'):
+            st.error(st.session_state['coil_bank_error_v10'])
+
+        stored_name = st.session_state.get('coil_bank_result_name_v10')
+        if stored_name == preset_name and st.session_state.get('coil_bank_result_v10'):
+            res = st.session_state['coil_bank_result_v10']
+            cards = [('Bank 1', f"{res['bank1']:.3f} {res['unit']}", None)]
+            if preset['bank2']:
+                cards.append(('Bank 2', f"{res['bank2']:.3f} {res['unit']}", None))
+            cards.append(('Total', f"{res['total']:.3f} {res['unit']}", None))
+            _metric_cards(cards)
+            if res['populated_bank1']:
+                st.caption('Populated Bank 1 refs: ' + ', '.join(res['populated_bank1']))
+            if preset['bank2'] and res['populated_bank2']:
+                st.caption('Populated Bank 2 refs: ' + ', '.join(res['populated_bank2']))
             if 'min_total' in res:
                 st.info(f"Tolerance range: {res['min_total']:.3f} to {res['max_total']:.3f} {res['unit']}")
 
+        if stored_name == preset_name and st.session_state.get('coil_resonance_v10'):
+            rr = st.session_state['coil_resonance_v10']
+            st.markdown('##### Resonance from preset capacitance')
+            _metric_cards([
+                ('Resonant frequency', f"{rr['frequency_mhz']:.3f} MHz", None),
+                ('Inductance used', f"{rr['inductance_uh']:.3f} µH", None),
+                ('Effective C', f"{rr['capacitance_pf']:.3f} pF", None),
+            ])
+        if stored_name == preset_name and st.session_state.get('coil_target_result_v10'):
+            tr = st.session_state['coil_target_result_v10']
+            st.markdown('##### Required total capacitance for target frequency')
+            _metric_cards([
+                ('Target frequency', f"{tr['frequency_mhz']:.3f} MHz", None),
+                ('Inductance used', f"{tr['inductance_uh']:.3f} µH", None),
+                ('Required total C', f"{tr['capacitance_pf']:.3f} pF", None),
+            ])
 
 def render_derate_workspace():
     _workspace_intro('Derate Reports', 'Align a transmitter TAR/CSV with chamber data, generate the derate chart, and export summary tables.')

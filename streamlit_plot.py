@@ -581,51 +581,314 @@ def build_label_pdf(labels_df, sales_order, customer_po, settings):
     output.seek(0)
     return output.getvalue()
 
+def inject_branding():
+    st.markdown(
+        f"""
+        <style>
+        :root {{
+            --wb-blue: #17a8ff;
+            --wb-blue-deep: #0c5ea8;
+            --wb-blue-soft: #eaf6ff;
+            --wb-text: #0f172a;
+            --wb-muted: #5b6472;
+            --wb-border: rgba(23, 168, 255, 0.18);
+            --wb-shadow: 0 14px 36px rgba(15, 23, 42, 0.08);
+        }}
+        .stApp {{
+            background:
+                radial-gradient(circle at top right, rgba(23,168,255,0.09), transparent 30%),
+                linear-gradient(180deg, #f8fbff 0%, #f4f8fc 100%);
+            color: var(--wb-text);
+        }}
+        [data-testid="stHeader"] {{
+            background: rgba(248, 251, 255, 0.7);
+            backdrop-filter: blur(10px);
+        }}
+        [data-testid="stToolbar"] {{ right: 1rem; }}
+        .block-container {{
+            padding-top: 1.35rem;
+            padding-bottom: 2rem;
+            max-width: 1380px;
+        }}
+        .wibotic-watermark {{
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -42%);
+            width: min(44vw, 620px);
+            height: min(44vw, 620px);
+            background-image: url("data:image/png;base64,{LOGO_B64}");
+            background-repeat: no-repeat;
+            background-size: contain;
+            background-position: center;
+            opacity: 0.07;
+            pointer-events: none;
+            z-index: 0;
+            filter: saturate(1.15) hue-rotate(4deg);
+        }}
+        .wibotic-watermark::after {{
+            content: "";
+            position: absolute;
+            inset: -12%;
+            background: radial-gradient(circle, rgba(23,168,255,0.10) 0%, rgba(23,168,255,0.04) 42%, transparent 72%);
+            z-index: -1;
+            filter: blur(8px);
+        }}
+        .wibotic-hero {{
+            position: relative;
+            z-index: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            gap: 0.95rem;
+            padding: 2rem 2rem 1.6rem 2rem;
+            margin: 0 auto 1.15rem auto;
+            background: linear-gradient(180deg, rgba(255,255,255,0.92), rgba(245,250,255,0.90));
+            border: 1px solid rgba(23,168,255,0.20);
+            border-radius: 28px;
+            box-shadow: 0 18px 48px rgba(15, 23, 42, 0.08);
+            max-width: 1120px;
+            overflow: hidden;
+        }}
+        .wibotic-hero::before {{
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(180deg, rgba(23,168,255,0.06), transparent 30%, transparent 70%, rgba(12,94,168,0.04));
+            pointer-events: none;
+        }}
+        .wibotic-hero__logo {{
+            width: 132px;
+            height: 132px;
+            border-radius: 34px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: radial-gradient(circle at 50% 35%, rgba(255,255,255,0.98) 0%, rgba(232,244,255,0.96) 55%, rgba(191,228,255,0.72) 100%);
+            border: 1px solid rgba(23,168,255,0.22);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.9), 0 16px 36px rgba(23,168,255,0.16);
+            flex: 0 0 auto;
+        }}
+        .wibotic-hero__logo img {{
+            width: 92px;
+            height: 92px;
+            object-fit: contain;
+            filter: drop-shadow(0 6px 10px rgba(12,94,168,0.10));
+        }}
+        .wibotic-hero__title {{
+            margin: 0;
+            font-size: clamp(2.4rem, 5vw, 4.2rem);
+            line-height: 1.02;
+            font-weight: 900;
+            color: #071a3d;
+            letter-spacing: -0.04em;
+        }}
+        .wibotic-hero__subtitle {{
+            margin: 0.2rem 0 0 0;
+            color: var(--wb-muted);
+            font-size: clamp(1rem, 1.55vw, 1.35rem);
+            max-width: 900px;
+        }}
+        .wibotic-badges {{
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 0.55rem;
+            margin-top: 0.85rem;
+        }}
+        .wibotic-badge {{
+            padding: 0.38rem 0.72rem;
+            border-radius: 999px;
+            font-size: 0.84rem;
+            font-weight: 700;
+            color: var(--wb-blue-deep);
+            background: rgba(23,168,255,0.1);
+            border: 1px solid rgba(23,168,255,0.18);
+        }}
+        div[role="radiogroup"] {{
+            gap: 0.55rem;
+            flex-wrap: wrap;
+        }}
+        div[role="radiogroup"] > label[data-baseweb="radio"] {{
+            margin-right: 0 !important;
+            background: rgba(255,255,255,0.78);
+            border: 1px solid var(--wb-border);
+            border-radius: 18px;
+            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.04);
+            padding: 0.58rem 0.95rem;
+            min-height: 48px;
+        }}
+        div[role="radiogroup"] > label[data-baseweb="radio"] > div:first-child {{
+            display: none;
+        }}
+        div[role="radiogroup"] > label[data-baseweb="radio"] p {{
+            font-weight: 700 !important;
+            color: #476072 !important;
+        }}
+        div[role="radiogroup"] > label[data-baseweb="radio"][aria-checked="true"] {{
+            background: linear-gradient(135deg, rgba(23,168,255,0.22), rgba(12,94,168,0.18)) !important;
+            border-color: rgba(23,168,255,0.42) !important;
+        }}
+        div[role="radiogroup"] > label[data-baseweb="radio"][aria-checked="true"] p {{
+            color: #0b2942 !important;
+        }}
+        div[data-testid="stVerticalBlock"] div[data-testid="stVerticalBlock"] > div:has(> div[data-testid="stFileUploader"]),
+        div[data-testid="stVerticalBlock"] div[data-testid="stVerticalBlock"] > div:has(> div[data-testid="stDataFrame"]),
+        div[data-testid="stVerticalBlock"] div[data-testid="stVerticalBlock"] > div:has(> div.stDownloadButton) {{
+            position: relative;
+            z-index: 1;
+        }}
+        div[data-testid="stFileUploader"],
+        div[data-testid="stDataFrame"],
+        div[data-testid="stMetric"],
+        .stAlert,
+        .stPlotlyChart,
+        .stDownloadButton > button,
+        .stButton > button,
+        .stTextInput input,
+        .stNumberInput input,
+        .stTextArea textarea,
+        .stSelectbox div[data-baseweb="select"],
+        .stMultiSelect div[data-baseweb="select"] {{
+            border-radius: 14px;
+        }}
+        .stButton > button,
+        .stDownloadButton > button {{
+            border: 1px solid rgba(23,168,255,0.2);
+            background: linear-gradient(180deg, #ffffff, #f3faff);
+            box-shadow: 0 8px 18px rgba(15, 23, 42, 0.05);
+            font-weight: 700;
+        }}
+        .stButton > button[kind="primary"] {{
+            background: linear-gradient(135deg, #17a8ff, #0c5ea8);
+            color: white;
+            border: none;
+        }}
+        h1, h2, h3 {{ color: #0b2942; letter-spacing: -0.02em; }}
+        p, label, .stCaption {{ color: var(--wb-muted); }}
+        @media (max-width: 900px) {{
+            .wibotic-hero {{ padding: 1.4rem 1rem 1.2rem 1rem; }}
+            .wibotic-hero__logo {{ width: 108px; height: 108px; border-radius: 28px; }}
+            .wibotic-hero__logo img {{ width: 78px; height: 78px; }}
+            .wibotic-watermark {{ width: min(70vw, 360px); height: min(70vw, 360px); opacity: 0.05; transform: translate(-50%, -34%); }}
+        }}
+        </style>
+        <div class="wibotic-watermark"></div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_app_header():
+    st.markdown(
+        f"""
+        <div class="wibotic-hero">
+            <div class="wibotic-hero__logo">
+                <img src="data:image/png;base64,{LOGO_B64}" alt="Wibotic logo" />
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def render_workspace_selector():
+    options = ['Derate Reports', 'Arduino Viewer', 'Plot Explorer', 'Label Studio']
+    selected = st.radio(
+        'Workspace',
+        options,
+        index=options.index(st.session_state.get('active_workspace', 'Label Studio')) if st.session_state.get('active_workspace', 'Label Studio') in options else 0,
+        horizontal=True,
+        key='active_workspace',
+        label_visibility='collapsed',
+    )
+    return selected
+
+
+
 def render_label_tab():
     st.subheader('Label')
-    if 'selected_label_pattern' not in st.session_state:
-        st.session_state['selected_label_pattern'] = 'Nabtesco'
+    st.caption('Choose a customer label pattern, edit the layout on the left, and review the live preview on the right before exporting the PDF.')
 
-    st.caption('Choose a customer label pattern. Nabtesco is built in now, and more can be added later.')
-    b1, b2 = st.columns([1, 3])
-    with b1:
-        if st.button('Nabtesco', use_container_width=True):
-            st.session_state['selected_label_pattern'] = 'Nabtesco'
-    with b2:
-        st.text_input('Selected pattern', value=st.session_state['selected_label_pattern'], disabled=True, key='selected_pattern_display')
+    pattern = st.radio(
+        'Label pattern',
+        ['Nabtesco'],
+        index=0,
+        horizontal=True,
+        key='selected_label_pattern',
+        label_visibility='collapsed'
+    )
 
-    if st.session_state['selected_label_pattern'] != 'Nabtesco':
+    if pattern != 'Nabtesco':
         st.info('This label pattern is not implemented yet.')
         return
 
     st.markdown('### Nabtesco')
-    st.caption('Upload the SOS-style CSV, adjust layout if needed, preview it, then export the PDF.')
 
-    left, right = st.columns([1.1, 0.9])
-    with left:
+    editor_col, preview_col = st.columns([0.95, 1.35], gap='large')
+
+    with editor_col:
+        st.markdown('#### Edit label')
         label_csv = st.file_uploader('Shipment CSV', type=['csv'], key='nabtesco_csv')
+
         sales_order = st.text_input('Sales Order', key='nabtesco_sales_order')
         customer_po = st.text_input('Customer Purchase Order', key='nabtesco_customer_po')
-        label_width = st.number_input('Label width (in)', min_value=1.0, value=4.0, step=0.1, key='nab_label_width')
-        label_height = st.number_input('Label height (in)', min_value=1.0, value=2.32, step=0.01, key='nab_label_height')
-        font_size = st.number_input('Font size', min_value=6, value=10, step=1, key='nab_font_size')
-        x_offset = st.number_input('Text X offset (in)', value=0.0, step=0.02, format='%.2f', key='nab_x_offset')
-        y_offset = st.number_input('Text Y offset (in)', value=0.0, step=0.02, format='%.2f', key='nab_y_offset')
-        line_spacing = st.number_input('Line spacing (in)', min_value=0.15, value=0.30, step=0.01, format='%.2f', key='nab_line_spacing')
-        logo_scale = st.number_input('Logo scale', min_value=0.2, value=1.0, step=0.1, format='%.1f', key='nab_logo_scale')
-        preview_count = st.slider('Page preview label count', min_value=1, max_value=6, value=3, key='nab_preview_count')
 
-    with right:
-        st.write('Logo')
-        logo = get_logo_image()
-        if logo is not None:
-            st.image(logo, width=220)
-            st.caption('Logo is embedded in this script.')
+        preset_options = ['4.00 × 2.32', '6.00 × 2.32', 'Custom']
+        preset = st.radio(
+            'Label size preset',
+            preset_options,
+            horizontal=True,
+            key='nab_size_preset',
+            label_visibility='collapsed'
+        )
+
+        preset_map = {
+            '4.00 × 2.32': (4.0, 2.32),
+            '6.00 × 2.32': (6.0, 2.32),
+        }
+
+        def labeled_number(label, key, value, min_value=None, step=None, fmt=None, integer=False, help_text=None, disabled=False):
+            lcol, wcol = st.columns([0.92, 1.18], gap='small')
+            with lcol:
+                st.markdown(f"<div style='padding-top:0.45rem;font-weight:600;color:#445066'>{label}</div>", unsafe_allow_html=True)
+            with wcol:
+                if key not in st.session_state:
+                    st.session_state[key] = value
+                kwargs = dict(label=label, key=key, label_visibility='collapsed', disabled=disabled)
+                if min_value is not None:
+                    kwargs['min_value'] = min_value
+                if step is not None:
+                    kwargs['step'] = step
+                if fmt is not None:
+                    kwargs['format'] = fmt
+                if help_text is not None:
+                    kwargs['help'] = help_text
+                return st.number_input(**kwargs)
+
+        custom_size = preset == 'Custom'
+        if custom_size:
+            label_width = labeled_number('Label width', 'nab_custom_width', st.session_state.get('nab_custom_width', 4.0), min_value=1.0, step=0.1, fmt='%.2f')
+            label_height = labeled_number('Label height', 'nab_custom_height', st.session_state.get('nab_custom_height', 2.32), min_value=1.0, step=0.01, fmt='%.2f')
         else:
-            st.info('Embedded logo could not be loaded.')
+            preset_width, preset_height = preset_map[preset]
+            st.markdown(f"<div style='font-weight:700;color:#445066;margin-top:0.15rem;margin-bottom:0.35rem;'>Label size</div>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div style='padding:0.72rem 0.9rem;border-radius:14px;background:rgba(255,255,255,0.84);border:1px solid rgba(23,168,255,0.16);font-weight:700;color:#0b2942;margin-bottom:0.75rem;'>{preset_width:.2f} in × {preset_height:.2f} in</div>",
+                unsafe_allow_html=True
+            )
+            label_width, label_height = preset_width, preset_height
+
+        st.markdown('##### Layout tuning')
+        font_size = labeled_number('Font size', 'nab_font_size', 10, min_value=6, step=1)
+        x_offset = labeled_number('Text X offset', 'nab_x_offset', 0.0, step=0.02, fmt='%.2f')
+        y_offset = labeled_number('Text Y offset', 'nab_y_offset', 0.0, step=0.02, fmt='%.2f')
+        line_spacing = labeled_number('Line spacing', 'nab_line_spacing', 0.30, min_value=0.15, step=0.01, fmt='%.2f')
+        logo_scale = labeled_number('Logo scale', 'nab_logo_scale', 1.0, min_value=0.2, step=0.1, fmt='%.1f')
+        preview_count = int(labeled_number('Page preview count', 'nab_preview_count_num', 3, min_value=1, step=1))
 
     if label_csv is None:
-        st.info('Upload a CSV to use this tab.')
+        with preview_col:
+            st.info('Upload a CSV to open the label preview.')
         return
 
     try:
@@ -640,51 +903,57 @@ def render_label_tab():
             logo_scale=logo_scale,
         )
 
-        st.success(f'{len(labels_df)} labels created from the CSV.')
+        with editor_col:
+            st.success(f'{len(labels_df)} labels created from the CSV.')
+            with st.expander('Label data', expanded=False):
+                st.dataframe(labels_df, use_container_width=True, height=240)
+            with st.expander('Summary', expanded=False):
+                summary_df = (
+                    labels_df.groupby(['Part Number', 'Part Name'], dropna=False)
+                    .size()
+                    .reset_index(name='Label Count')
+                    .sort_values(['Part Number', 'Part Name'])
+                )
+                st.dataframe(summary_df, use_container_width=True, height=220)
 
-        preview_tab, data_tab, summary_tab = st.tabs(['Preview', 'Label data', 'Summary'])
-        with preview_tab:
+            if sales_order.strip() and customer_po.strip():
+                pdf_bytes = build_label_pdf(
+                    labels_df,
+                    sales_order=sales_order.strip(),
+                    customer_po=customer_po.strip(),
+                    settings=settings,
+                )
+                st.download_button(
+                    'Download label PDF',
+                    pdf_bytes,
+                    file_name='nabtesco_labels.pdf',
+                    mime='application/pdf',
+                    use_container_width=True,
+                )
+            else:
+                st.warning('Enter Sales Order and Customer Purchase Order to enable the final PDF export.')
+
+        with preview_col:
+            st.markdown('#### Preview')
             first_label = labels_df.iloc[0].to_dict()
-            c1, c2 = st.columns([1, 1])
-            with c1:
-                st.markdown('**First label preview**')
-                st.image(build_label_preview_image(first_label, sales_order.strip(), customer_po.strip(), settings, scale=2), use_container_width=True)
-            with c2:
-                st.markdown('**Page preview**')
+            preview_choice = st.radio(
+                'Preview mode',
+                ['Single label', 'Page view'],
+                horizontal=True,
+                key='nab_preview_mode'
+            )
+            if preview_choice == 'Single label':
+                preview_img = build_label_preview_image(first_label, sales_order.strip(), customer_po.strip(), settings, scale=2)
+                st.image(preview_img, use_container_width=True)
+            else:
                 page_img = build_page_preview_image(labels_df, sales_order.strip(), customer_po.strip(), settings, max_labels=preview_count, scale=1)
                 if page_img is not None:
                     st.image(page_img, use_container_width=True)
-                st.caption('This is an on-screen preview to help you adjust spacing before exporting the PDF.')
+            st.caption('Edit the controls on the left. The preview updates here so you can fine-tune spacing before exporting.')
 
-        with data_tab:
-            st.dataframe(labels_df, use_container_width=True, height=320)
-
-        with summary_tab:
-            summary_df = (
-                labels_df.groupby(['Part Number', 'Part Name'], dropna=False)
-                .size()
-                .reset_index(name='Label Count')
-                .sort_values(['Part Number', 'Part Name'])
-            )
-            st.dataframe(summary_df, use_container_width=True, height=220)
-
-        if sales_order.strip() and customer_po.strip():
-            pdf_bytes = build_label_pdf(
-                labels_df,
-                sales_order=sales_order.strip(),
-                customer_po=customer_po.strip(),
-                settings=settings,
-            )
-            st.download_button(
-                'Download label PDF',
-                pdf_bytes,
-                file_name='nabtesco_labels.pdf',
-                mime='application/pdf'
-            )
-        else:
-            st.warning('Enter Sales Order and Customer Purchase Order to enable the final PDF export.')
     except Exception as e:
-        st.error(f'Failed to build labels: {e}')
+        with preview_col:
+            st.error(f'Failed to build labels: {e}')
 
 def render_plot_tab():
     st.subheader('Plot')
@@ -837,11 +1106,11 @@ def render_plot_tab():
 # -----------------------------
 # UI
 # -----------------------------
-st.title('Derated + Arduino + Plot')
+inject_branding()
+render_app_header()
+active_workspace = render_workspace_selector()
 
-derate_tab, arduino_tab, plot_tab, label_tab = st.tabs(['Derated', 'Arduino', 'Plot', 'Label'])
-
-with derate_tab:
+if active_workspace == 'Derate Reports':
     st.subheader('Derate report')
     left, right = st.columns([1, 1])
     with left:
@@ -913,7 +1182,7 @@ with derate_tab:
         except Exception as e:
             st.error(str(e))
 
-with arduino_tab:
+elif active_workspace == 'Arduino Viewer':
     st.subheader('Arduino Cloud viewer')
     arduino_file = st.file_uploader('Arduino CSV', type=['csv'], key='arduino_file')
     if arduino_file is not None:
@@ -960,9 +1229,7 @@ with arduino_tab:
     else:
         st.info('Upload an Arduino Cloud CSV to use this tab.')
 
-with plot_tab:
+elif active_workspace == 'Plot Explorer':
     render_plot_tab()
-
-
-with label_tab:
+else:
     render_label_tab()

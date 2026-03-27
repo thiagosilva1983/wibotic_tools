@@ -806,10 +806,126 @@ def build_jabil_pdf(labels_df, sales_order, customer_po, settings, date_code='')
     return output.getvalue()
 
 
+
+
+# ---------- Label help / templates ----------
+try:
+    NABTESCO_TEMPLATE_BYTES = Path("/mnt/data/CSV Example.csv").read_bytes()
+except Exception:
+    NABTESCO_TEMPLATE_BYTES = b"Item,Description,Shipped\n130-000058,TR-302-AC-ST-JP | SN:WX123456789,1\n"
+
+
+def _build_jabil_template_bytes():
+    try:
+        df = pd.read_csv(io.BytesIO(NABTESCO_TEMPLATE_BYTES))
+        if 'Customer Part Number' not in df.columns:
+            df['Customer Part Number'] = ''
+        return df.head(6).to_csv(index=False).encode('utf-8')
+    except Exception:
+        sample = pd.DataFrame([
+            {
+                'Item': '130-000058',
+                'Description': 'TR-302-AC-ST-JP | SN:WX123456789',
+                'Shipped': 1,
+                'Customer Part Number': 'JABIL-EXAMPLE-001',
+            }
+        ])
+        return sample.to_csv(index=False).encode('utf-8')
+
+
+JABIL_TEMPLATE_BYTES = _build_jabil_template_bytes()
+
+
+def _label_help_table(rows):
+    return pd.DataFrame(rows, columns=['Field', 'Required', 'Example', 'How it is used'])
+
+
+def _show_columns_found(uploaded_file, required_cols, optional_cols, key_prefix):
+    if uploaded_file is None:
+        return
+    try:
+        uploaded_file.seek(0)
+        df = pd.read_csv(uploaded_file, nrows=5)
+        uploaded_file.seek(0)
+        found = list(df.columns)
+        required_found = [c for c in required_cols if c in found]
+        optional_found = [c for c in optional_cols if c in found]
+        missing = [c for c in required_cols if c not in found]
+        st.markdown('##### CSV check')
+        c1, c2, c3 = st.columns(3)
+        c1.metric('Columns found', len(found))
+        c2.metric('Required matched', len(required_found))
+        c3.metric('Missing required', len(missing))
+        st.caption('Detected columns: ' + ', '.join(found))
+        if optional_found:
+            st.caption('Optional columns found: ' + ', '.join(optional_found))
+        if missing:
+            st.warning('Missing required columns for this pattern: ' + ', '.join(missing))
+        else:
+            st.success('Required columns look good for this pattern.')
+    except Exception as e:
+        st.warning(f'Could not inspect CSV columns: {e}')
+
+
+def _render_nabtesco_help(label_csv=None):
+    required = ['Item', 'Description', 'Shipped']
+    optional = ['Part Number', 'Part Name', 'Quantity', 'Serial Number', 'S/N', 'SN']
+    with st.expander('Help for Nabtesco', expanded=False):
+        st.markdown('**Overview**')
+        st.write('Upload the shipment CSV used for Nabtesco labels. The parser reads the shipment rows and creates one label per serial number when serials are present.')
+        d1, d2 = st.columns([1, 1])
+        d1.download_button('Download Nabtesco template CSV', data=NABTESCO_TEMPLATE_BYTES, file_name='nabtesco_template.csv', mime='text/csv', use_container_width=True, key='nab_help_dl')
+        d2.caption('Best results come from the same CSV style you already use for shipment exports.')
+        st.markdown('**Required CSV fields**')
+        st.dataframe(_label_help_table([
+            ['Item', 'Yes', '130-000058', 'Part number printed on the label'],
+            ['Description', 'Yes', 'TR-302-AC-ST-JP | SN:WX683F7D3C', 'Used to find part name and any serial numbers embedded in the text'],
+            ['Shipped', 'Yes', '10', 'Used as quantity when a row is not serialized'],
+            ['Serial Number / S/N / SN', 'Optional', 'WX683F7D3C', 'Used if serials are not embedded inside Description'],
+        ]), use_container_width=True, hide_index=True)
+        st.markdown('**Example CSV**')
+        try:
+            example_df = pd.read_csv(io.BytesIO(NABTESCO_TEMPLATE_BYTES)).head(5)
+            st.dataframe(example_df, use_container_width=True, height=180)
+        except Exception:
+            st.caption('Template preview unavailable.')
+        st.markdown('**Common issues**')
+        st.write('• Missing `Description` or `Item` columns.  • Serial numbers not present in either Description or Serial Number fields.  • Duplicate serials collapse into one label.')
+        _show_columns_found(label_csv, required, optional, 'nab_help')
+
+
+def _render_jabil_help(label_csv=None):
+    required = ['Item', 'Description', 'Shipped']
+    optional = ['Customer Part Number', 'Jabil Part Number', 'Customer PN', 'Serial Number', 'S/N', 'SN']
+    with st.expander('Help for Jabil', expanded=False):
+        st.markdown('**Overview**')
+        st.write('Upload the shipment CSV for Jabil labels. The app can use a customer part number column when present, or fall back to the built-in part-number map.')
+        d1, d2 = st.columns([1, 1])
+        d1.download_button('Download Jabil template CSV', data=JABIL_TEMPLATE_BYTES, file_name='jabil_template.csv', mime='text/csv', use_container_width=True, key='jabil_help_dl')
+        d2.caption('Sales Order, Customer Purchase Order, and Date Code are entered in the app, not in the CSV.')
+        st.markdown('**Required CSV fields**')
+        st.dataframe(_label_help_table([
+            ['Item', 'Yes', '130-000058', 'Internal part number used for the label and customer-PN mapping'],
+            ['Description', 'Yes', 'TR-302-AC-ST-JP | SN:WX683F7D3C', 'Used to find part name and serial numbers'],
+            ['Shipped', 'Yes', '10', 'Used as quantity when a row is not serialized'],
+            ['Customer Part Number / Jabil Part Number / Customer PN', 'Optional', 'JBL-12345', 'Overrides the built-in customer part number map for the printed label'],
+        ]), use_container_width=True, hide_index=True)
+        st.markdown('**Example CSV**')
+        try:
+            example_df = pd.read_csv(io.BytesIO(JABIL_TEMPLATE_BYTES)).head(5)
+            st.dataframe(example_df, use_container_width=True, height=180)
+        except Exception:
+            st.caption('Template preview unavailable.')
+        st.markdown('**Common issues**')
+        st.write('• Missing `Item` or `Description`.  • No serial number and no shipped quantity.  • Customer part number mismatch when you expected an override column.')
+        _show_columns_found(label_csv, required, optional, 'jabil_help')
+
+
 def render_nabtesco_editor():
     st.markdown('### Nabtesco')
     editor_col, preview_col = st.columns([0.95, 1.35], gap='large')
     with editor_col:
+        _render_nabtesco_help(st.session_state.get('nabtesco_csv'))
         st.markdown('#### Edit label')
         label_csv = st.file_uploader('Shipment CSV', type=['csv'], key='nabtesco_csv')
         sales_order = st.text_input('Sales Order', key='nabtesco_sales_order')
@@ -879,6 +995,7 @@ def render_jabil_editor():
     st.markdown('### Jabil')
     editor_col, preview_col = st.columns([0.95, 1.35], gap='large')
     with editor_col:
+        _render_jabil_help(st.session_state.get('jabil_csv'))
         st.markdown('#### Edit label')
         label_csv = st.file_uploader('Shipment CSV', type=['csv'], key='jabil_csv')
         sales_order = st.text_input('Sales Order', key='jabil_sales_order')
@@ -886,16 +1003,20 @@ def render_jabil_editor():
         date_code = st.text_input('Date Code', key='jabil_date_code')
         st.markdown(f"<div style='font-weight:700;color:#445066;margin-top:0.15rem;margin-bottom:0.35rem;'>Label size</div>", unsafe_allow_html=True)
         st.markdown("<div style='padding:0.72rem 0.9rem;border-radius:14px;background:rgba(255,255,255,0.84);border:1px solid rgba(23,168,255,0.16);font-weight:700;color:#0b2942;margin-bottom:0.75rem;'>6.00 in × 4.00 in</div>", unsafe_allow_html=True)
+
         def jn(label, key, value, min_value=None, step=None, fmt=None):
             lcol, wcol = st.columns([0.92, 1.18], gap='small')
-            with lcol: st.markdown(f"<div style='padding-top:0.45rem;font-weight:600;color:#445066'>{label}</div>", unsafe_allow_html=True)
+            with lcol:
+                st.markdown(f"<div style='padding-top:0.45rem;font-weight:600;color:#445066'>{label}</div>", unsafe_allow_html=True)
             with wcol:
-                if key not in st.session_state: st.session_state[key]=value
+                if key not in st.session_state:
+                    st.session_state[key]=value
                 kwargs=dict(label=label, key=key, label_visibility='collapsed')
                 if min_value is not None: kwargs['min_value']=min_value
                 if step is not None: kwargs['step']=step
                 if fmt is not None: kwargs['format']=fmt
                 return st.number_input(**kwargs)
+
         st.markdown('##### Layout tuning')
         logo_scale = jn('Logo scale', 'jabil_logo_scale', 1.0, min_value=0.2, step=0.1, fmt='%.1f')
         preview_count = int(jn('Page preview count', 'jabil_preview_count_num', 3, min_value=1, step=1))
@@ -924,18 +1045,195 @@ def render_jabil_editor():
             else:
                 previews = [build_jabil_preview_image(row, sales_order.strip(), customer_po.strip(), settings, date_code=date_code.strip(), scale=1) for row in labels_df.head(preview_count).to_dict(orient='records')]
                 width = max(img.width for img in previews)
-                gap=16
-                height = sum(img.height for img in previews) + gap*(len(previews)-1)
+                gap = 16
+                height = sum(img.height for img in previews) + gap * (len(previews) - 1)
                 sheet = Image.new('RGB', (width, height), '#f4f4f4')
-                y=0
+                y = 0
                 for img in previews:
-                    sheet.paste(img, (0,y))
+                    sheet.paste(img, (0, y))
                     y += img.height + gap
                 st.image(sheet, use_container_width=True)
     except Exception as e:
         with preview_col:
             st.error(f'Failed to build Jabil labels: {e}')
 
+
+def render_workspace_selector():
+    options = ['Derate Reports', 'Arduino Viewer', 'Plot Explorer', 'Label Studio', 'RF Calculator']
+    selected = st.radio(
+        'Workspace',
+        options,
+        index=options.index(st.session_state.get('active_workspace', 'RF Calculator')) if st.session_state.get('active_workspace', 'RF Calculator') in options else 0,
+        horizontal=True,
+        key='active_workspace',
+        label_visibility='collapsed',
+    )
+    return selected
+
+
+
+
+
+def render_label_tab():
+    st.subheader('Label')
+    st.caption('Choose a customer label pattern, edit the layout on the left, and review the live preview on the right before exporting the PDF.')
+    tab_nab, tab_jabil = st.tabs(['Nabtesco', 'Jabil'])
+    with tab_nab:
+        render_nabtesco_editor()
+    with tab_jabil:
+        render_jabil_editor()
+
+def render_plot_tab():
+    st.subheader('Plot')
+    st.caption('Use TAR file from Wibotic Transmitter log.')
+
+    left, right = st.columns([1.05, 1.35])
+
+    with left:
+        plot_file = st.file_uploader('Plot CSV/TAR', type=['csv', 'tar'], key='plot_file')
+        plot_suffix = None
+        if plot_file is not None and plot_file.name.lower().endswith('.tar'):
+            try:
+                plot_suffix_options = sorted([s for s, entry in scan_tar_bytes(plot_file.getvalue()).items() if 'RX' in entry and 'TX' in entry])
+                plot_suffix = st.selectbox('RX/TX pair', plot_suffix_options, index=0, key='plot_suffix')
+            except Exception as e:
+                st.error(f'Could not inspect TAR: {e}')
+
+        plot_title = st.text_input('Plot title', value='Data Plot', key='plot_title_input')
+        signal_filter = st.text_input('Signal filter', value='', key='plot_signal_filter').strip().lower()
+
+        c1, c2 = st.columns(2)
+        smoothing_mode = c1.selectbox('Smoothing', ['None', 'Moving Average', 'Median', 'EMA'], index=0, key='plot_smoothing')
+        x_axis_mode = c2.selectbox('X axis', ['Seconds', 'Minutes', 'Hours', 'Sample Index'], index=0, key='plot_xaxis')
+
+        c3, c4 = st.columns(2)
+        smoothing_window = c3.number_input('Window', min_value=1, value=5, step=1, key='plot_window')
+        ignore_seconds = c4.number_input('Ignore first sec', min_value=0.0, value=60.0, step=10.0, key='plot_ignore')
+
+    prepared_df = None
+    source_caption = None
+    all_plot_cols = []
+
+    if plot_file is not None:
+        try:
+            raw_df, source_type, chosen_suffix = read_source_uploaded(plot_file, plot_suffix)
+            prepared_df = prepare_loaded_dataframe(raw_df)
+            all_plot_cols = get_plot_columns(prepared_df)
+            source_caption = f"Loaded {plot_file.name} | source={source_type}" + (f" | pair={chosen_suffix}" if chosen_suffix else '')
+            st.caption(source_caption)
+        except Exception as e:
+            st.error(f'Failed to load plot file: {e}')
+
+    with right:
+        if prepared_df is None:
+            st.info('Upload a CSV or TAR file to use the Plot tab.')
+            return
+
+        filtered_cols = [c for c in all_plot_cols if signal_filter in c.lower()]
+        if not filtered_cols:
+            st.warning('No numeric signals match the current filter.')
+            return
+
+        st.write('Preset selection')
+        p1, p2, p3, p4, p5, p6, p7 = st.columns(7)
+        if p1.button('Recommended', key='preset_rec'):
+            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Recommended')
+        if p2.button('Temp', key='preset_temp'):
+            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Temp')
+        if p3.button('Voltage', key='preset_volt'):
+            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Voltage')
+        if p4.button('Power', key='preset_power'):
+            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Power')
+        if p5.button('Rx', key='preset_rx'):
+            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Rx')
+        if p6.button('Tx', key='preset_tx'):
+            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Tx')
+        if p7.button('Clear', key='preset_clear'):
+            st.session_state['plot_selected_columns'] = []
+
+        default_selection = st.session_state.get('plot_selected_columns')
+        valid_default = [c for c in (default_selection or []) if c in filtered_cols]
+        if not valid_default:
+            valid_default = [c for c in apply_preset(filtered_cols, 'Recommended') if c in filtered_cols]
+
+        selected_columns = st.multiselect(
+            'Signals to plot',
+            options=filtered_cols,
+            default=valid_default,
+            format_func=friendly_label,
+            key='plot_selected_columns'
+        )
+
+        st.write('Scale factors')
+        scale_map = {}
+        show_cols = selected_columns[:24]
+        more_count = max(0, len(selected_columns) - len(show_cols))
+        grid_cols = st.columns(3)
+        for i, col in enumerate(show_cols):
+            scale_map[col] = grid_cols[i % 3].number_input(
+                f'{col} scale',
+                value=1.0,
+                step=0.1,
+                format='%.3f',
+                key=f'scale_{col}'
+            )
+        if more_count:
+            st.caption(f'{more_count} more selected signals are using scale 1.0 and are hidden to keep the page manageable.')
+        for col in selected_columns[24:]:
+            scale_map[col] = 1.0
+
+        if not selected_columns:
+            st.warning('Select one or more signals to plot.')
+            return
+
+        filtered_df = prepared_df.copy()
+        filtered_df['Time_sec'] = pd.to_numeric(filtered_df['Time_sec'], errors='coerce')
+        filtered_df = filtered_df[filtered_df['Time_sec'] > float(ignore_seconds)].copy()
+        if filtered_df.empty:
+            st.warning('No rows remain after the ignore-first-seconds filter.')
+            return
+
+        x_data, x_label = get_time_axis_values(filtered_df['Time_sec'], x_axis_mode)
+        fig = plt.figure(figsize=(11.5, 6.2))
+        ax = fig.add_subplot(111)
+        export_df = pd.DataFrame({'Time_sec': filtered_df['Time_sec'].reset_index(drop=True)})
+
+        for col in selected_columns:
+            y_data = pd.to_numeric(filtered_df[col], errors='coerce') * float(scale_map.get(col, 1.0))
+            y_data = smooth_series(y_data, smoothing_mode, smoothing_window)
+            valid = y_data.notna()
+            if valid.sum() == 0:
+                continue
+            ax.plot(x_data[valid.to_numpy()], y_data[valid], label=f'{col} (Scale: {float(scale_map.get(col, 1.0))})', linewidth=0.9)
+            avg_value = float(y_data[valid].mean())
+            ax.axhline(y=avg_value, linestyle='--', linewidth=0.7, alpha=0.6)
+            export_df[col] = (pd.to_numeric(filtered_df[col], errors='coerce') * float(scale_map.get(col, 1.0))).reset_index(drop=True)
+            export_df[f'{col}_smoothed'] = y_data.reset_index(drop=True)
+
+        ax.set_xlabel(x_label)
+        ax.set_ylabel('Value')
+        ax.set_title(plot_title)
+        ax.grid(True, alpha=0.45)
+        ax.legend(fontsize=8, ncol=2)
+        fig.tight_layout()
+        st.pyplot(fig, clear_figure=False)
+
+        stats_df = compute_stats_text(filtered_df, selected_columns, scale_map)
+        cstats1, cstats2 = st.columns([1, 1])
+        cstats1.dataframe(stats_df, use_container_width=True, height=260)
+        preview_cols = ['Time_sec'] + selected_columns[:6]
+        cstats2.dataframe(filtered_df[preview_cols].head(250), use_container_width=True, height=260)
+
+        png_bytes = io.BytesIO()
+        fig.savefig(png_bytes, format='png', dpi=150, bbox_inches='tight')
+        png_bytes.seek(0)
+        st.download_button('Download plot PNG', png_bytes.getvalue(), file_name='plot.png', mime='image/png')
+        st.download_button('Download filtered CSV', export_df.to_csv(index=False).encode('utf-8'), file_name='filtered_plot_data.csv', mime='text/csv')
+
+
+# -----------------------------
+# UI
+# -----------------------------
 def inject_branding():
     st.markdown(
         f"""
@@ -1262,180 +1560,7 @@ def render_app_header():
         unsafe_allow_html=True,
     )
 
-def render_workspace_selector():
-    options = ['Derate Reports', 'Arduino Viewer', 'Plot Explorer', 'Label Studio', 'RF Calculator']
-    selected = st.radio(
-        'Workspace',
-        options,
-        index=options.index(st.session_state.get('active_workspace', 'RF Calculator')) if st.session_state.get('active_workspace', 'RF Calculator') in options else 0,
-        horizontal=True,
-        key='active_workspace',
-        label_visibility='collapsed',
-    )
-    return selected
 
-
-
-def render_label_tab():
-    st.subheader('Label')
-    st.caption('Choose a customer label pattern, edit the layout on the left, and review the live preview on the right before exporting the PDF.')
-    tab_nab, tab_jabil = st.tabs(['Nabtesco', 'Jabil'])
-    with tab_nab:
-        render_nabtesco_editor()
-    with tab_jabil:
-        render_jabil_editor()
-
-def render_plot_tab():
-    st.subheader('Plot')
-    st.caption('This tab follows the style of your plot_v5 app, but only for plotting in Streamlit.')
-
-    left, right = st.columns([1.05, 1.35])
-
-    with left:
-        plot_file = st.file_uploader('Plot CSV/TAR', type=['csv', 'tar'], key='plot_file')
-        plot_suffix = None
-        if plot_file is not None and plot_file.name.lower().endswith('.tar'):
-            try:
-                plot_suffix_options = sorted([s for s, entry in scan_tar_bytes(plot_file.getvalue()).items() if 'RX' in entry and 'TX' in entry])
-                plot_suffix = st.selectbox('RX/TX pair', plot_suffix_options, index=0, key='plot_suffix')
-            except Exception as e:
-                st.error(f'Could not inspect TAR: {e}')
-
-        plot_title = st.text_input('Plot title', value='Data Plot', key='plot_title_input')
-        signal_filter = st.text_input('Signal filter', value='', key='plot_signal_filter').strip().lower()
-
-        c1, c2 = st.columns(2)
-        smoothing_mode = c1.selectbox('Smoothing', ['None', 'Moving Average', 'Median', 'EMA'], index=0, key='plot_smoothing')
-        x_axis_mode = c2.selectbox('X axis', ['Seconds', 'Minutes', 'Hours', 'Sample Index'], index=0, key='plot_xaxis')
-
-        c3, c4 = st.columns(2)
-        smoothing_window = c3.number_input('Window', min_value=1, value=5, step=1, key='plot_window')
-        ignore_seconds = c4.number_input('Ignore first sec', min_value=0.0, value=60.0, step=10.0, key='plot_ignore')
-
-    prepared_df = None
-    source_caption = None
-    all_plot_cols = []
-
-    if plot_file is not None:
-        try:
-            raw_df, source_type, chosen_suffix = read_source_uploaded(plot_file, plot_suffix)
-            prepared_df = prepare_loaded_dataframe(raw_df)
-            all_plot_cols = get_plot_columns(prepared_df)
-            source_caption = f"Loaded {plot_file.name} | source={source_type}" + (f" | pair={chosen_suffix}" if chosen_suffix else '')
-            st.caption(source_caption)
-        except Exception as e:
-            st.error(f'Failed to load plot file: {e}')
-
-    with right:
-        if prepared_df is None:
-            st.info('Upload a CSV or TAR file to use the Plot tab.')
-            return
-
-        filtered_cols = [c for c in all_plot_cols if signal_filter in c.lower()]
-        if not filtered_cols:
-            st.warning('No numeric signals match the current filter.')
-            return
-
-        st.write('Preset selection')
-        p1, p2, p3, p4, p5, p6, p7 = st.columns(7)
-        if p1.button('Recommended', key='preset_rec'):
-            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Recommended')
-        if p2.button('Temp', key='preset_temp'):
-            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Temp')
-        if p3.button('Voltage', key='preset_volt'):
-            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Voltage')
-        if p4.button('Power', key='preset_power'):
-            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Power')
-        if p5.button('Rx', key='preset_rx'):
-            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Rx')
-        if p6.button('Tx', key='preset_tx'):
-            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Tx')
-        if p7.button('Clear', key='preset_clear'):
-            st.session_state['plot_selected_columns'] = []
-
-        default_selection = st.session_state.get('plot_selected_columns')
-        valid_default = [c for c in (default_selection or []) if c in filtered_cols]
-        if not valid_default:
-            valid_default = [c for c in apply_preset(filtered_cols, 'Recommended') if c in filtered_cols]
-
-        selected_columns = st.multiselect(
-            'Signals to plot',
-            options=filtered_cols,
-            default=valid_default,
-            format_func=friendly_label,
-            key='plot_selected_columns'
-        )
-
-        st.write('Scale factors')
-        scale_map = {}
-        show_cols = selected_columns[:24]
-        more_count = max(0, len(selected_columns) - len(show_cols))
-        grid_cols = st.columns(3)
-        for i, col in enumerate(show_cols):
-            scale_map[col] = grid_cols[i % 3].number_input(
-                f'{col} scale',
-                value=1.0,
-                step=0.1,
-                format='%.3f',
-                key=f'scale_{col}'
-            )
-        if more_count:
-            st.caption(f'{more_count} more selected signals are using scale 1.0 and are hidden to keep the page manageable.')
-        for col in selected_columns[24:]:
-            scale_map[col] = 1.0
-
-        if not selected_columns:
-            st.warning('Select one or more signals to plot.')
-            return
-
-        filtered_df = prepared_df.copy()
-        filtered_df['Time_sec'] = pd.to_numeric(filtered_df['Time_sec'], errors='coerce')
-        filtered_df = filtered_df[filtered_df['Time_sec'] > float(ignore_seconds)].copy()
-        if filtered_df.empty:
-            st.warning('No rows remain after the ignore-first-seconds filter.')
-            return
-
-        x_data, x_label = get_time_axis_values(filtered_df['Time_sec'], x_axis_mode)
-        fig = plt.figure(figsize=(11.5, 6.2))
-        ax = fig.add_subplot(111)
-        export_df = pd.DataFrame({'Time_sec': filtered_df['Time_sec'].reset_index(drop=True)})
-
-        for col in selected_columns:
-            y_data = pd.to_numeric(filtered_df[col], errors='coerce') * float(scale_map.get(col, 1.0))
-            y_data = smooth_series(y_data, smoothing_mode, smoothing_window)
-            valid = y_data.notna()
-            if valid.sum() == 0:
-                continue
-            ax.plot(x_data[valid.to_numpy()], y_data[valid], label=f'{col} (Scale: {float(scale_map.get(col, 1.0))})', linewidth=0.9)
-            avg_value = float(y_data[valid].mean())
-            ax.axhline(y=avg_value, linestyle='--', linewidth=0.7, alpha=0.6)
-            export_df[col] = (pd.to_numeric(filtered_df[col], errors='coerce') * float(scale_map.get(col, 1.0))).reset_index(drop=True)
-            export_df[f'{col}_smoothed'] = y_data.reset_index(drop=True)
-
-        ax.set_xlabel(x_label)
-        ax.set_ylabel('Value')
-        ax.set_title(plot_title)
-        ax.grid(True, alpha=0.45)
-        ax.legend(fontsize=8, ncol=2)
-        fig.tight_layout()
-        st.pyplot(fig, clear_figure=False)
-
-        stats_df = compute_stats_text(filtered_df, selected_columns, scale_map)
-        cstats1, cstats2 = st.columns([1, 1])
-        cstats1.dataframe(stats_df, use_container_width=True, height=260)
-        preview_cols = ['Time_sec'] + selected_columns[:6]
-        cstats2.dataframe(filtered_df[preview_cols].head(250), use_container_width=True, height=260)
-
-        png_bytes = io.BytesIO()
-        fig.savefig(png_bytes, format='png', dpi=150, bbox_inches='tight')
-        png_bytes.seek(0)
-        st.download_button('Download plot PNG', png_bytes.getvalue(), file_name='plot.png', mime='image/png')
-        st.download_button('Download filtered CSV', export_df.to_csv(index=False).encode('utf-8'), file_name='filtered_plot_data.csv', mime='text/csv')
-
-
-# -----------------------------
-# UI
-# -----------------------------
 inject_branding()
 render_app_header()
 active_workspace = render_workspace_selector()

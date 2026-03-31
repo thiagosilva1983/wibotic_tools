@@ -1065,30 +1065,20 @@ def render_jabil_editor():
 
 
 
-
 # -----------------------------
-# SOS read-only workspace (Rev C merged)
+# SOS read-only workspace
 # -----------------------------
 SOS_BASE_URL = "https://api.sosinventory.com/api/v2/"
 SOS_AUTH_URL = "https://api.sosinventory.com/oauth2/authorize"
 SOS_TOKEN_URL = "https://api.sosinventory.com/oauth2/token"
 SOS_SAFE_FILENAME = re.compile(r"[^a-zA-Z0-9_-]+")
 SOS_LOCATION_RE = re.compile(r"(Aisle\s*[^,|]+?(?:,\s*Shelf\s*[^,|]+)?)", re.IGNORECASE)
-SOS_DEFAULT_LOCATIONS = [
-    "Production Inventory",
-    "Storage Unit",
-    "PCA Components",
-    "MRB Awaiting Evaluation",
-    "B Stock",
-    "Tate Technology",
-    "Consigned Qualtech",
-]
 
 
 @dataclass
 class SOSLineItem:
     item_id: int
-    on_hand: float
+    on_hand: int
     type: str
     quantity: float
     fullname: str
@@ -1115,33 +1105,13 @@ def sos_extract_location(notes: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def sos_trim_text(s: str, n: int = 60) -> str:
+def sos_trim_text(s: str, n: int = 45) -> str:
     s = (s or "").strip()
     return s if len(s) <= n else s[: n - 3] + "..."
 
 
 def sos_normalize_item_text(value: str) -> str:
-    value = (value or "").strip().lower()
-    return re.sub(r"\s+", " ", value)
-
-
-def sos_extract_base_part(value: str) -> str:
-    value = sos_normalize_item_text(value)
-    m = re.match(r"([a-z0-9]+-\d+)", value)
-    return m.group(1) if m else value
-
-
-def sos_type_rank(item_type: str) -> int:
-    t = sos_normalize_item_text(item_type)
-    if t in ["inventory item", "assembly", "item group"]:
-        return 0
-    if t in ["non-inventory item"]:
-        return 1
-    if t in ["service"]:
-        return 2
-    if t in ["expense"]:
-        return 3
-    return 4
+    return re.sub(r"\s+", " ", (value or "").strip()).lower()
 
 
 def sos_item_choice_label(item: SOSLineItem) -> str:
@@ -1152,7 +1122,7 @@ def sos_item_choice_label(item: SOSLineItem) -> str:
 def sos_serialize_item(item: SOSLineItem) -> Dict[str, Any]:
     return {
         'item_id': int(item.item_id),
-        'on_hand': float(item.on_hand),
+        'on_hand': int(item.on_hand),
         'type': item.type,
         'quantity': float(item.quantity),
         'fullname': item.fullname,
@@ -1166,7 +1136,7 @@ def sos_serialize_item(item: SOSLineItem) -> Dict[str, Any]:
 def sos_deserialize_item(data: Dict[str, Any]) -> SOSLineItem:
     return SOSLineItem(
         item_id=int(data['item_id']),
-        on_hand=float(data.get('on_hand', 0)),
+        on_hand=int(data.get('on_hand', 0)),
         type=str(data.get('type', '')),
         quantity=float(data.get('quantity', 1)),
         fullname=str(data.get('fullname', '')),
@@ -1177,60 +1147,36 @@ def sos_deserialize_item(data: Dict[str, Any]) -> SOSLineItem:
     )
 
 
-def sos_score_item(item: SOSLineItem, query_name: str) -> Tuple[int, int]:
-    q = sos_normalize_item_text(query_name)
-    q_base = sos_extract_base_part(query_name)
-    fullname = sos_normalize_item_text(item.fullname)
-    base = sos_extract_base_part(item.fullname)
-    score = 999
-    if fullname == q:
-        score = 0
-    elif base == q_base:
-        score = 10 + sos_type_rank(item.type)
-        if "labor" in fullname:
-            score += 20
-    elif fullname.startswith(q):
-        score = 40 + sos_type_rank(item.type)
-        if "labor" in fullname:
-            score += 20
-    elif q in fullname or q_base in fullname:
-        score = 80 + sos_type_rank(item.type)
-        if "labor" in fullname:
-            score += 20
-    return (score, len(fullname))
-
-
 def sos_pick_best_item(items: List[SOSLineItem], query_name: str) -> Optional[SOSLineItem]:
     if not items:
         return None
-    ranked = sorted(items, key=lambda it: sos_score_item(it, query_name))
+
+    q = sos_normalize_item_text(query_name)
+
+    def score(item: SOSLineItem) -> tuple:
+        full = sos_normalize_item_text(item.fullname)
+        desc = sos_normalize_item_text(item.description)
+        first_token = full.split(' ')[0] if full else ''
+        labor_penalty = 1 if 'labor' in full or 'labor' in desc else 0
+        rank = 0
+        if full == q:
+            rank = 100
+        elif first_token == q:
+            rank = 90
+        elif full.startswith(q + ' '):
+            rank = 80
+        elif full.startswith(q):
+            rank = 70
+        elif q in full:
+            rank = 60
+        elif desc == q:
+            rank = 50
+        elif q in desc:
+            rank = 40
+        return (rank, -labor_penalty, -len(full))
+
+    ranked = sorted(items, key=score, reverse=True)
     return ranked[0]
-
-
-def sos_choose_item_interactive(items: List[SOSLineItem], query_name: str, key_prefix: str) -> Optional[SOSLineItem]:
-    if not items:
-        return None
-    ranked = sorted(items, key=lambda it: sos_score_item(it, query_name))
-    if len(ranked) == 1 or sos_score_item(ranked[0], query_name) < sos_score_item(ranked[1], query_name):
-        return ranked[0]
-    label_map = {sos_item_choice_label(x): x for x in ranked}
-    options = list(label_map.keys())
-    choice = st.selectbox(
-        f"Multiple SOS items found for '{query_name}'. Choose which one to use:",
-        options,
-        key=f"{key_prefix}_{query_name}",
-    )
-    return label_map[choice]
-
-
-def sos_choose_item_batch(items: List[SOSLineItem], query_name: str) -> Tuple[Optional[SOSLineItem], str]:
-    if not items:
-        return None, "No match"
-    ranked = sorted(items, key=lambda it: sos_score_item(it, query_name))
-    note = ""
-    if len(ranked) > 1 and sos_score_item(ranked[0], query_name) == sos_score_item(ranked[1], query_name):
-        note = "Multiple similar matches"
-    return ranked[0], note
 
 
 def sos_load_requests_from_csv(uploaded_file) -> List[Tuple[str, int]]:
@@ -1289,6 +1235,7 @@ def sos_exchange_code_for_token(code: str) -> dict:
     redirect_uri = sos_get_secret("SOS_REDIRECT_URI")
     if not client_id or not client_secret or not redirect_uri:
         raise SOSAuthError("Missing SOS_CLIENT_ID, SOS_CLIENT_SECRET, or SOS_REDIRECT_URI in secrets.")
+
     data = {
         "grant_type": "authorization_code",
         "client_id": client_id,
@@ -1360,59 +1307,20 @@ class SOSReadonlyClient:
                 continue
             if resp.ok:
                 return last_json
+            if resp.status_code == 400:
+                if "throttle" in str(last_json.get("message", "")).lower():
+                    continue
+                if last_json.get("status", "") == "invalid":
+                    return last_json
             if resp.status_code == 404:
                 raise ValueError(404)
             if attempts >= allowable_attempts:
                 raise RuntimeError(f"SOS GET failed ({resp.status_code}): {last_json.get('message', resp.text)}")
         return last_json
 
-    def get_items_by_id(self, ids: List[int], location: Optional[str] = None) -> List[SOSLineItem]:
-        if not ids:
-            return []
-        all_items: List[SOSLineItem] = []
-        chunk_size = 25
-        for i in range(0, len(ids), chunk_size):
-            chunk = ids[i:i + chunk_size]
-            params: Dict[str, Any] = {"ids": ",".join(str(x) for x in chunk)}
-            if location and location != "All":
-                params["location"] = location
-            items = self._get("item", params=params).get("data", []) or []
-            all_items.extend([
-                SOSLineItem(
-                    item_id=item["id"],
-                    on_hand=float(item.get("onhand", item.get("onHand", 0)) or 0),
-                    type=item.get("type", ""),
-                    quantity=1,
-                    fullname=item.get("fullname") or item.get("name") or "",
-                    description=item.get("description", ""),
-                    has_serial=item.get("serialTracking", False),
-                    notes=item.get("notes", ""),
-                )
-                for item in items
-            ])
-        return all_items
-
-    def get_items_by_name(self, name: str, location: Optional[str] = None) -> List[SOSLineItem]:
-        params: Dict[str, Any] = {"query": name}
-        if location and location != "All":
-            params["location"] = location
-        items = self._get("item", params=params).get("data", []) or []
-        return [
-            SOSLineItem(
-                item_id=item["id"],
-                on_hand=float(item.get("onhand", item.get("onHand", 0)) or 0),
-                type=item.get("type", ""),
-                quantity=1,
-                fullname=item.get("fullname") or item.get("name") or "",
-                description=item.get("description", ""),
-                has_serial=item.get("serialTracking", False),
-                notes=item.get("notes", ""),
-            )
-            for item in items
-        ]
-
     def get_sales_orders(self, query: str, maxresults: int = 20) -> List[Dict[str, Any]]:
-        return self._get("salesorder", params={"query": query, "maxresults": maxresults}).get("data", []) or []
+        resp = self._get("salesorder", params={"query": query, "maxresults": maxresults})
+        return resp.get("data", []) or []
 
     def get_sales_order_by_number(self, so_number: str) -> Optional[Dict[str, Any]]:
         matches = self.get_sales_orders(so_number, maxresults=50)
@@ -1426,7 +1334,8 @@ class SOSReadonlyClient:
         return matches[0]
 
     def get_sales_order_detail(self, so_id: int) -> Dict[str, Any]:
-        return self._get(f"salesorder/{int(so_id)}").get("data", {}) or {}
+        resp = self._get(f"salesorder/{int(so_id)}")
+        return resp.get("data", {}) or {}
 
     @staticmethod
     def extract_sales_order_lines(so_detail: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1445,18 +1354,41 @@ class SOSReadonlyClient:
             except Exception:
                 qty_i = 1
             item_obj = ln.get("item") or {}
-            name = (
-                item_obj.get("name")
-                or item_obj.get("fullname")
-                or ln.get("itemName")
-                or ln.get("name")
-                or ln.get("description")
-                or ""
-            )
+            name = item_obj.get("name") or item_obj.get("fullname") or ln.get("itemName") or ln.get("name") or ""
             name = str(name).strip()
+            if not name:
+                name = str(ln.get("description") or "").strip()
             if name:
                 reqs.append((name, qty_i))
         return reqs
+
+    def get_items_by_id(self, ids: List[int]) -> List[SOSLineItem]:
+        if not ids:
+            return []
+        all_items: List[SOSLineItem] = []
+        chunk_size = 25
+        for i in range(0, len(ids), chunk_size):
+            chunk = ids[i:i + chunk_size]
+            as_str = ",".join(str(x) for x in chunk)
+            items = self._get("item", params={"ids": as_str}).get("data", [])
+            all_items.extend([
+                SOSLineItem(
+                    item_id=item["id"],
+                    on_hand=item["onhand"],
+                    type=item["type"],
+                    quantity=1,
+                    fullname=item["fullname"],
+                    description=item.get("description", ""),
+                    has_serial=item.get("serialTracking", False),
+                    notes=item.get("notes", ""),
+                )
+                for item in items
+            ])
+        return all_items
+
+    def get_items_by_name(self, name: str) -> List[SOSLineItem]:
+        items = self._get("item", params={"query": name}).get("data", [])
+        return [SOSLineItem(item_id=item["id"], on_hand=item["onhand"], type=item["type"], quantity=1, fullname=item["fullname"], description=item.get("description", ""), has_serial=item.get("serialTracking", False), notes=item.get("notes", "")) for item in items]
 
     def get_single_level_bom(self, item_id: int, assembly_quantity: int) -> List[SOSLineItem]:
         try:
@@ -1467,7 +1399,6 @@ class SOSReadonlyClient:
             raise
         except requests.exceptions.ReadTimeout:
             return []
-
         lines = (resp.get("data") or {}).get("lines", []) or []
         if not lines:
             return []
@@ -1475,7 +1406,7 @@ class SOSReadonlyClient:
         bom_data = self.get_items_by_id(bom_ids)
         for bom_item in bom_data:
             item_build_data = next(e for e in lines if e["componentItem"]["id"] == bom_item.item_id)
-            bom_item.quantity = float(item_build_data.get("quantity") or 0) * assembly_quantity
+            bom_item.quantity = item_build_data["quantity"] * assembly_quantity
         return bom_data
 
     def bom_lookup(self, item: SOSLineItem, quantity: int = 1, always_explode: bool = True) -> List[SOSLineItem]:
@@ -1498,7 +1429,7 @@ class SOSReadonlyClient:
                 try:
                     item_self = self.get_items_by_id([int(assembly["item_id"])])[0]
                     item_self.quantity = float(assembly["quantity"])
-                    existing = next((x for x in line_items if x.item_id == item_self.item_id), None)
+                    existing = next((x for x in line_items if x.fullname == item_self.fullname), None)
                     if existing:
                         existing.quantity += item_self.quantity
                     else:
@@ -1511,7 +1442,7 @@ class SOSReadonlyClient:
                 if has_subassembly(bom_item) and always_explode:
                     assemblies.append({"item_id": bom_item.item_id, "quantity": bom_item.quantity})
                     continue
-                existing = next((x for x in line_items if x.item_id == bom_item.item_id), None)
+                existing = next((x for x in line_items if x.fullname == bom_item.fullname), None)
                 if existing:
                     existing.quantity += bom_item.quantity
                 else:
@@ -1552,123 +1483,147 @@ def sos_get_authenticated_client() -> Tuple[Optional[SOSReadonlyClient], str]:
     return None, "Not connected"
 
 
-def sos_build_location_matrix(client: SOSReadonlyClient, item_ids: List[int], locations: List[str]) -> Dict[int, Dict[str, float]]:
-    matrix: Dict[int, Dict[str, float]] = {item_id: {} for item_id in item_ids}
-    for loc in locations:
-        try:
-            rows = client.get_items_by_id(item_ids, location=loc)
-        except Exception:
-            rows = []
-        by_id = {r.item_id: r for r in rows}
-        for item_id in item_ids:
-            matrix[item_id][loc] = float(by_id.get(item_id, SOSLineItem(item_id, 0, "", 0, "", "", False)).on_hand)
-    return matrix
+def sos_bom_rows_from_selected_item(client: SOSReadonlyClient, item: SOSLineItem, qty: int, explode: bool = True) -> List[List[str]]:
+    if item is None:
+        return []
+    bom = client.bom_lookup(item, quantity=qty, always_explode=True) if explode else [item]
+    rows: List[List[str]] = []
+    for bi in bom:
+        needed = int(bi.quantity)
+        onhand = int(bi.on_hand)
+        short = max(needed - onhand, 0)
+        enough = "✅" if short == 0 else "❌"
+        rows.append([bi.fullname, enough, str(needed), str(onhand), str(short), bi.type, bi.description, sos_extract_location(bi.notes or ""), sos_trim_text(bi.notes or "", 45)])
+    return rows
 
 
-def sos_report_rows_from_components(components: List[SOSLineItem], location_matrix: Dict[int, Dict[str, float]], locations: List[str], source_label: str = "") -> pd.DataFrame:
-    primary_location = locations[0] if locations else "Production Inventory"
-    records: List[Dict[str, Any]] = []
-    for comp in components:
-        loc_map = location_matrix.get(comp.item_id, {})
-        primary_qty = float(loc_map.get(primary_location, 0))
-        total_qty = sum(float(v) for v in loc_map.values())
-        needed = float(comp.quantity)
-        short = max(needed - primary_qty, 0)
-        enough_primary = primary_qty >= needed
-        enough_total = total_qty >= needed
-        transfer_needed = (not enough_primary) and enough_total
-        other_nonzero = [f"{loc}: {float(qty):.0f}" for loc, qty in loc_map.items() if loc != primary_location and float(qty) > 0]
-
-        rec: Dict[str, Any] = {
-            "Source": source_label,
-            "Part Number": comp.fullname,
-            "Needed": needed,
-            "At Primary": primary_qty,
-            "Total Available": total_qty,
-            "Short at Primary": short,
-            "Enough at Primary": "✅" if enough_primary else "❌",
-            "Transfer Needed": "🟡" if transfer_needed else "",
-            "Type": comp.type,
-            "Name/Description": comp.description,
-            "Primary Location": primary_location,
-            "Other Locations": " | ".join(other_nonzero),
-            "Location": sos_extract_location(comp.notes or ""),
-            "Notes": sos_trim_text(comp.notes or "", 50),
-        }
-        for loc in locations:
-            rec[f"Loc: {loc}"] = float(loc_map.get(loc, 0))
-        records.append(rec)
-    return pd.DataFrame(records)
+def sos_bom_rows_from_item(client: SOSReadonlyClient, name: str, qty: int, explode: bool = True) -> List[List[str]]:
+    items = client.get_items_by_name(name)
+    if not items:
+        return []
+    item = sos_pick_best_item(items, name)
+    if item is None:
+        return []
+    return sos_bom_rows_from_selected_item(client, item, qty, explode=explode)
 
 
-def sos_rows_to_dataframe(rows: Any, headers: Optional[List[str]] = None, source_label: Optional[str] = None) -> pd.DataFrame:
-    if isinstance(rows, pd.DataFrame):
-        return rows
+def sos_rows_to_dataframe(rows: List[List[str]], headers: List[str], source_label: Optional[str] = None) -> pd.DataFrame:
     data_rows = []
     for row in rows:
-        if source_label is None:
-            data_rows.append(row)
-        else:
-            data_rows.append([source_label] + row)
-    if headers is None:
-        return pd.DataFrame(data_rows)
+        data_rows.append(row if source_label is None else [source_label] + row)
     if source_label is None:
         return pd.DataFrame(data_rows, columns=headers)
     return pd.DataFrame(data_rows, columns=["Assembly / SO Line"] + headers)
 
 
-def render_sos_dashboard_tab(df: pd.DataFrame):
-    if df is None or df.empty:
-        st.info('Run a check first to populate the dashboard.')
+def sos_grouped_sales_order_dataframe(client: SOSReadonlyClient, so_number: str, explode: bool) -> pd.DataFrame:
+    so_obj = client.get_sales_order_by_number(so_number)
+    if not so_obj:
+        raise ValueError(f"Sales order not found: {so_number}")
+    so_id = so_obj.get("id")
+    if not so_id:
+        raise ValueError(f"Sales order missing id: {so_obj}")
+    so_detail = client.get_sales_order_detail(int(so_id))
+    reqs = client.sales_order_to_requests(so_detail)
+    headers = ["Part Number", "Enough", "Needed", "On Hand", "Short", "Type", "Name/Description", "Location", "Notes"]
+    frames: List[pd.DataFrame] = []
+    for name, qty in reqs:
+        rows = sos_bom_rows_from_item(client, name, qty, explode=explode)
+        if rows:
+            frames.append(sos_rows_to_dataframe(rows, headers, source_label=f"{name} x{qty}"))
+    if not frames:
+        return pd.DataFrame(columns=["Assembly / SO Line"] + headers)
+    return pd.concat(frames, ignore_index=True)
+
+
+def render_sos_dashboard_viewer():
+    st.subheader('Dashboard / CSV viewer')
+    df = st.session_state.get('sos_last_df')
+    label = st.session_state.get('sos_last_label', 'Current result')
+    if df is None or getattr(df, 'empty', True):
+        st.info('Run a Single, Batch CSV, or Sales Order check first. The result will appear here for filtering, summaries, and export.')
         return
 
-    st.subheader('Dashboard')
-    c1, c2, c3 = st.columns([1, 1, 2])
-    with c1:
-        show_short = st.checkbox('Show shortages only', value=False, key='sos_dash_short')
-    with c2:
-        transfer_only = st.checkbox('Show transfer-needed only', value=False, key='sos_dash_transfer')
-    with c3:
-        search = st.text_input('Search part / description / source', key='sos_dash_search')
+    st.caption(f'Viewing: {label}')
+    work = df.copy()
 
-    filtered = df.copy()
-    if show_short and 'Short at Primary' in filtered.columns:
-        filtered = filtered[pd.to_numeric(filtered['Short at Primary'], errors='coerce').fillna(0) > 0]
-    if transfer_only and 'Transfer Needed' in filtered.columns:
-        filtered = filtered[filtered['Transfer Needed'] == '🟡']
-    if search.strip():
-        s = search.strip().lower()
-        filtered = filtered[
-            filtered.astype(str).apply(lambda col: col.str.lower().str.contains(s, na=False)).any(axis=1)
-        ]
+    fc1, fc2, fc3, fc4 = st.columns([1.2, 1.2, 1.4, 1.0])
+    with fc1:
+        short_only = st.checkbox('Shortages only', value=False, key='sos_dash_short_only')
+    with fc2:
+        search_text = st.text_input('Search PN / description', key='sos_dash_search')
+    with fc3:
+        locations = ['(all)'] + sorted([str(x) for x in work.get('Location', pd.Series(dtype=str)).fillna('').replace('', '(blank)').unique().tolist()]) if 'Location' in work.columns else ['(all)']
+        selected_location = st.selectbox('Location', locations, key='sos_dash_location')
+    with fc4:
+        source_options = ['(all)'] + sorted([str(x) for x in work.get('Assembly / SO Line', pd.Series(dtype=str)).fillna('').unique().tolist()]) if 'Assembly / SO Line' in work.columns else ['(all)']
+        selected_source = st.selectbox('Source', source_options, key='sos_dash_source')
 
-    st.dataframe(filtered, use_container_width=True, hide_index=True, height=420)
+    if short_only and 'Short' in work.columns:
+        short_num = pd.to_numeric(work['Short'], errors='coerce').fillna(0)
+        work = work[short_num > 0].copy()
+    if search_text:
+        mask = pd.Series(False, index=work.index)
+        for col in [c for c in ['Part Number', 'Name/Description', 'Notes', 'Assembly / SO Line'] if c in work.columns]:
+            mask = mask | work[col].astype(str).str.contains(search_text, case=False, na=False)
+        work = work[mask].copy()
+    if selected_location != '(all)' and 'Location' in work.columns:
+        loc_series = work['Location'].fillna('').replace('', '(blank)')
+        work = work[loc_series == selected_location].copy()
+    if selected_source != '(all)' and 'Assembly / SO Line' in work.columns:
+        work = work[work['Assembly / SO Line'].astype(str) == selected_source].copy()
 
-    if not filtered.empty:
-        with st.expander('Summary by part'):
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric('Rows', len(work))
+    with m2:
+        if 'Part Number' in work.columns:
+            st.metric('Unique parts', int(work['Part Number'].astype(str).nunique()))
+    with m3:
+        if 'Short' in work.columns:
+            st.metric('Total short', int(pd.to_numeric(work['Short'], errors='coerce').fillna(0).sum()))
+    with m4:
+        if 'Assembly / SO Line' in work.columns:
+            st.metric('Sources', int(work['Assembly / SO Line'].astype(str).nunique()))
+
+    if work.empty:
+        st.warning('No rows match the current filters.')
+        return
+
+    st.dataframe(work, use_container_width=True, hide_index=True, height=420)
+    st.download_button(
+        'Download filtered CSV',
+        data=work.to_csv(index=False).encode('utf-8'),
+        file_name=sos_safe_default_filename(f'{label}_filtered'),
+        mime='text/csv',
+        key='sos_dash_dl',
+    )
+
+    s1, s2 = st.columns(2)
+    with s1:
+        if 'Part Number' in work.columns and 'Short' in work.columns:
             by_part = (
-                filtered.groupby('Part Number', as_index=False)
-                .agg({'Needed': 'sum', 'Total Available': 'sum', 'Short at Primary': 'sum'})
-                .sort_values(['Short at Primary', 'Part Number'], ascending=[False, True])
+                work.assign(Short_num=pd.to_numeric(work['Short'], errors='coerce').fillna(0), Needed_num=pd.to_numeric(work.get('Needed', 0), errors='coerce').fillna(0))
+                .groupby('Part Number', as_index=False)
+                .agg(Short_Total=('Short_num', 'sum'), Needed_Total=('Needed_num', 'sum'), Lines=('Part Number', 'count'))
+                .sort_values(['Short_Total', 'Needed_Total'], ascending=False)
             )
-            st.dataframe(by_part, use_container_width=True, hide_index=True)
-
-        with st.expander('Summary by source'):
-            by_source = (
-                filtered.groupby('Source', as_index=False)
-                .agg({'Needed': 'sum', 'Short at Primary': 'sum'})
-                .sort_values(['Short at Primary', 'Source'], ascending=[False, True])
+            st.markdown('**Summary by part**')
+            st.dataframe(by_part, use_container_width=True, hide_index=True, height=260)
+    with s2:
+        if 'Location' in work.columns and 'Short' in work.columns:
+            loc = work.copy()
+            loc['Location'] = loc['Location'].fillna('').replace('', '(blank)')
+            by_loc = (
+                loc.assign(Short_num=pd.to_numeric(loc['Short'], errors='coerce').fillna(0))
+                .groupby('Location', as_index=False)
+                .agg(Short_Total=('Short_num', 'sum'), UniqueParts=('Part Number', 'nunique') if 'Part Number' in loc.columns else ('Location', 'count'), Lines=('Location', 'count'))
+                .sort_values(['Short_Total', 'Lines'], ascending=False)
             )
-            st.dataframe(by_source, use_container_width=True, hide_index=True)
+            st.markdown('**Summary by location**')
+            st.dataframe(by_loc, use_container_width=True, hide_index=True, height=260)
 
-        st.download_button(
-            'Download filtered CSV',
-            data=filtered.to_csv(index=False).encode('utf-8'),
-            file_name=sos_safe_default_filename('sos_dashboard_filtered'),
-            mime='text/csv',
-            use_container_width=True,
-            key='sos_dashboard_dl',
-        )
+
 
 
 def render_sos_help_tab():
@@ -1677,62 +1632,66 @@ def render_sos_help_tab():
 Use this workspace to check **live SOS inventory and BOM availability** without changing anything in SOS.
 
 **Single**
-- Enter one exact item or part number.
-- Click **Find items**.
-- If SOS returns multiple matches, choose the correct one.
+- Enter one exact item or part name.
+- Choose a quantity.
 - Click **Run single check**.
-- The report shows component availability across the selected locations.
+- The app looks up the item in SOS and explodes the BOM.
 
 **Batch CSV**
 - Upload a CSV with an item column and a quantity column.
 - Supported item headers: `Item Name`, `ItemName`, `Part Name`, `Name`, `Item Number`, `Part Number`, `PN`
 - Supported quantity headers: `Quantity`, `quantity`, `qty`, `QTY`
+- Click **Run batch check**.
 
 **Sales Order**
 - Enter the SOS sales order number.
-- The app loads order lines from SOS and checks BOM demand.
-- Timeout handling is built in for heavier cloud runs.
+- Leave **Explode subassemblies** checked to sync full BOM demand.
+- Click **Run sales order check**.
 
 **Dashboard**
 - Review the last result on-page.
-- Filter shortages, transfer-needed rows, and export the filtered CSV.
+- Filter shortages, search part numbers, and export the filtered CSV.
 
-**Location logic**
-- The first selected location is treated as the **primary** one.
-- `At Primary` shows availability there.
-- `Total Available` shows stock across all selected locations.
-- `Transfer Needed` means the primary location is short, but enough stock exists elsewhere.
+**Safety**
+- This workspace is read-only.
+- It checks live SOS data but does not create builds and does not write back to SOS.
 """)
+
     template_df = pd.DataFrame([
-        {'Part Number': '140-000060', 'Quantity': 1},
         {'Part Number': '130-000101 Rev C', 'Quantity': 2},
         {'Part Number': '330-000038', 'Quantity': 12},
+        {'Part Number': '720-000141', 'Quantity': 4},
     ])
-    st.dataframe(template_df, use_container_width=True, hide_index=True)
-    st.download_button(
-        'Download CSV template',
-        data=template_df.to_csv(index=False).encode('utf-8'),
-        file_name='sos_batch_template.csv',
-        mime='text/csv',
-        key='sos_template_dl',
-        use_container_width=True,
-    )
+    template_bytes = template_df.to_csv(index=False).encode('utf-8')
 
+    st.markdown('**CSV template example**')
+    st.dataframe(template_df, use_container_width=True, hide_index=True)
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.download_button(
+            'Download CSV template',
+            data=template_bytes,
+            file_name='sos_batch_template.csv',
+            mime='text/csv',
+            key='sos_template_dl',
+            use_container_width=True,
+        )
+    with c2:
+        st.caption('You can use `Part Number` or any of the supported item-name headers. Quantities should be whole numbers.')
 
 def render_sos_workspace():
     st.subheader('SOS Inventory')
-    st.caption('Read-only SOS inventory, BOM, and sales-order checks with location-aware availability.')
+    st.caption('Read-only SOS inventory, BOM, and sales-order checks. No POST, no PUT, no build creation.')
 
-    def _sos_mark_live_fetch(source: str, df: pd.DataFrame, note: str = ''):
+    def _sos_mark_live_fetch(source: str, rows_count: int, shortage_count: int, note: str = ''):
         st.session_state['sos_last_fetch_time'] = pd.Timestamp.now().strftime('%Y-%m-%d %I:%M:%S %p')
         st.session_state['sos_last_source'] = source
-        st.session_state['sos_last_rows'] = int(len(df)) if df is not None else 0
-        short_count = int(pd.to_numeric(df.get('Short at Primary', pd.Series(dtype=float)), errors='coerce').fillna(0).gt(0).sum()) if df is not None and not df.empty else 0
-        st.session_state['sos_last_shortages'] = short_count
+        st.session_state['sos_last_rows'] = int(rows_count)
+        st.session_state['sos_last_shortages'] = int(shortage_count)
         st.session_state['sos_last_note'] = note
 
     auth_url = sos_build_auth_url()
-    with st.expander('Connection and advanced options', expanded=False):
+    with st.expander('SOS connection', expanded=True):
         c1, c2 = st.columns([1, 2])
         client: Optional[SOSReadonlyClient] = None
         status_text = 'Not connected'
@@ -1740,24 +1699,19 @@ def render_sos_workspace():
             client, status_text = sos_get_authenticated_client()
         except Exception as exc:
             st.error(f'SOS authentication failed: {exc}')
-            client = None
         with c1:
             st.metric('Connection', 'Ready' if client else 'Not ready')
         with c2:
             st.write(status_text)
             if auth_url:
                 st.markdown(f'[Connect to SOS]({auth_url})')
+            else:
+                st.info('OAuth link appears after SOS_CLIENT_ID and SOS_REDIRECT_URI are added to secrets.')
             if 'sos_refresh_token_latest' in st.session_state:
                 latest = st.session_state['sos_refresh_token_latest']
                 masked = latest[:8] + '...' + latest[-8:] if isinstance(latest, str) and len(latest) > 20 else 'Hidden'
+                st.info('A new refresh token was returned. Replace the old SOS_REFRESH_TOKEN in your secrets after testing.')
                 st.caption(f'New token received: {masked}')
-        locs = st.multiselect(
-            'Locations to include in the report',
-            options=SOS_DEFAULT_LOCATIONS,
-            default=st.session_state.get('sos_selected_locations', ['Production Inventory', 'Storage Unit', 'PCA Components']),
-            key='sos_locations_select',
-        )
-        st.session_state['sos_selected_locations'] = locs
         cc1, cc2 = st.columns([1, 3])
         if cc1.button('Forget SOS session token', key='forget_sos_session_btn'):
             for key in ['sos_access_token', 'sos_refresh_token_latest']:
@@ -1769,50 +1723,43 @@ SOS_CLIENT_ID="..."
 SOS_CLIENT_SECRET="..."
 SOS_REDIRECT_URI="https://your-app.streamlit.app/""" , language='toml')
 
-    # ensure client exists even if expander collapsed
-    try:
-        client, _status_text = sos_get_authenticated_client()
-    except Exception as exc:
-        st.error(f'SOS authentication failed: {exc}')
-        client = None
-
     if client is None:
         st.warning('Add SOS secrets first. The workspace is ready, but it cannot talk to SOS until a refresh token or OAuth secrets are available.')
         return
 
-    locations = st.session_state.get('sos_selected_locations', ['Production Inventory', 'Storage Unit', 'PCA Components'])
-    if not locations:
-        st.info('Pick at least one SOS location in the advanced options. Production Inventory is usually best as the first / primary location.')
-        return
-
-    st.markdown('#### Live SOS Inventory Checker')
+    st.markdown('#### Live SOS status')
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric('Live SOS', 'Connected')
+    m1.metric('Source', st.session_state.get('sos_last_source', 'Connected to live SOS'))
     m2.metric('Last sync', st.session_state.get('sos_last_fetch_time', 'Not run yet'))
     m3.metric('Rows returned', st.session_state.get('sos_last_rows', 0))
     m4.metric('Shortages', st.session_state.get('sos_last_shortages', 0))
-    st.caption(st.session_state.get('sos_last_note', f'Primary location: {locations[0]} | Read-only live inventory and BOM checker.'))
+    st.caption(st.session_state.get('sos_last_note', 'Run a check to confirm live SOS fetch and BOM explosion activity.'))
 
-    tabs = st.tabs(['Single', 'Batch CSV', 'Sales Order', 'Dashboard', 'Help'])
+    headers = ['Part Number', 'Enough', 'Needed', 'On Hand', 'Short', 'Type', 'Name/Description', 'Location', 'Notes']
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(['Single', 'Batch CSV', 'Sales Order', 'Dashboard', 'Help'])
 
-    with tabs[0]:
+    with tab1:
         st.subheader('Single item check')
         single_name = st.text_input('Item name or part number', key='sos_single_name')
         single_qty = st.number_input('Quantity', min_value=1, value=1, step=1, key='sos_single_qty')
+
         cfind1, cfind2 = st.columns([1, 1])
-
         if cfind1.button('Find items', key='sos_find_single_items'):
-            query = single_name.strip()
-            if not query:
-                st.warning('Enter an item name or part number first.')
-            else:
-                with st.spinner('Talking to SOS live API and searching matching items...'):
-                    matches = client.get_items_by_name(query)
-                st.session_state['sos_single_query'] = query
-                st.session_state['sos_single_candidates'] = [sos_serialize_item(x) for x in matches]
-
+            try:
+                query = single_name.strip()
+                if not query:
+                    st.warning('Enter an item name or part number first.')
+                else:
+                    with st.spinner('Talking to SOS live API and searching matching items...'):
+                        matches = client.get_items_by_name(query)
+                    st.session_state['sos_single_query'] = query
+                    st.session_state['sos_single_candidates'] = [sos_serialize_item(x) for x in matches]
+                    auto = sos_pick_best_item(matches, query)
+                    st.session_state['sos_single_auto_item_id'] = int(auto.item_id) if auto else None
+            except Exception as exc:
+                st.error(str(exc))
         if cfind2.button('Clear item search', key='sos_clear_single_items'):
-            for key in ['sos_single_query', 'sos_single_candidates']:
+            for key in ['sos_single_query', 'sos_single_candidates', 'sos_single_auto_item_id']:
                 st.session_state.pop(key, None)
             st.rerun()
 
@@ -1824,231 +1771,123 @@ SOS_REDIRECT_URI="https://your-app.streamlit.app/""" , language='toml')
             if not candidates:
                 st.warning('No SOS items matched that search.')
             else:
-                selected_item = sos_choose_item_interactive(candidates, single_name, 'sos_single_choice')
-                if selected_item:
-                    st.success(f'Selected: {selected_item.fullname} | {selected_item.type} | On hand: {int(selected_item.on_hand)}')
+                exact_matches = [x for x in candidates if sos_normalize_item_text(x.fullname) == sos_normalize_item_text(single_name)]
+                if len(exact_matches) == 1:
+                    selected_item = exact_matches[0]
+                    st.success(f'Exact SOS match found: {selected_item.fullname}')
+                else:
+                    label_map = {sos_item_choice_label(x): x for x in candidates}
+                    options = list(label_map.keys())
+                    default_item_id = st.session_state.get('sos_single_auto_item_id')
+                    default_index = 0
+                    for idx, opt in enumerate(options):
+                        if label_map[opt].item_id == default_item_id:
+                            default_index = idx
+                            break
+                    chosen_label = st.selectbox('Multiple SOS items found. Choose which one to fetch:', options, index=default_index, key='sos_single_choice')
+                    selected_item = label_map[chosen_label]
+                    st.caption(f'Selected: {selected_item.fullname}')
 
         if st.button('Run single check', key='sos_run_single'):
-            query = single_name.strip()
-            if not query:
-                st.warning('Enter an item name or part number first.')
-            else:
-                if selected_item is None:
-                    with st.spinner('Talking to SOS live API, finding matching items, and exploding BOM...'):
-                        matches = client.get_items_by_name(query)
-                    if not matches:
-                        st.warning('No item found.')
+            try:
+                query = single_name.strip()
+                if not query:
+                    st.warning('Enter an item name or part number first.')
+                else:
+                    if selected_item is None:
+                        with st.spinner('Talking to SOS live API, finding matching items, and exploding BOM...'):
+                            matches = client.get_items_by_name(query)
+                        if not matches:
+                            _sos_mark_live_fetch('Single item', 0, 0, 'Live SOS lookup ran, but no matching item was found.')
+                            st.warning('No item found.')
+                            return
+                        st.session_state['sos_single_query'] = query
+                        st.session_state['sos_single_candidates'] = [sos_serialize_item(x) for x in matches]
+                        auto = sos_pick_best_item(matches, query)
+                        st.session_state['sos_single_auto_item_id'] = int(auto.item_id) if auto else None
+                        if len(matches) > 1 and not any(sos_normalize_item_text(x.fullname) == sos_normalize_item_text(query) for x in matches):
+                            st.info('Multiple SOS items were found. Choose the correct one from the dropdown, then click Run single check again.')
+                            st.rerun()
+                        selected_item = auto
+
+                    with st.spinner('Talking to SOS live API, syncing the selected item, and exploding BOM...'):
+                        rows = sos_bom_rows_from_selected_item(client, selected_item, int(single_qty), explode=True)
+                    if not rows:
+                        _sos_mark_live_fetch('Single item', 0, 0, 'Live SOS lookup ran, but the selected item returned no BOM rows.')
+                        st.warning('No BOM rows returned for the selected item.')
                     else:
-                        selected_item = sos_choose_item_interactive(matches, query, 'sos_single_choice_run')
+                        df = sos_rows_to_dataframe(rows, headers)
+                        shortage_count = int(pd.to_numeric(df['Short'], errors='coerce').fillna(0).gt(0).sum()) if 'Short' in df.columns else 0
+                        _sos_mark_live_fetch('Single item', len(df), shortage_count, f'Live SOS fetch complete. BOM exploded for {selected_item.fullname} x{int(single_qty)}.')
+                        st.success(f'Live SOS fetch complete for {selected_item.fullname}. BOM rows returned: {len(df)}. Shortage rows: {shortage_count}.')
+                        st.caption(f'Data source: SOS live API • Fetched at: {st.session_state.get("sos_last_fetch_time")}')
+                        st.session_state['sos_last_df'] = df.copy()
+                        st.session_state['sos_last_label'] = f'Single_{selected_item.fullname}_x{single_qty}'
+                        st.dataframe(df, use_container_width=True, hide_index=True, height=460)
+                        st.download_button('Download CSV', data=df.to_csv(index=False).encode('utf-8'), file_name=sos_safe_default_filename(f'Single_{selected_item.fullname}_x{single_qty}'), mime='text/csv', key='sos_single_dl')
+            except Exception as exc:
+                st.error(str(exc))
 
-                if selected_item is not None:
-                    with st.spinner('Talking to SOS live API, syncing the selected item, exploding BOM, and checking locations...'):
-                        components = client.bom_lookup(selected_item, quantity=int(single_qty), always_explode=True)
-                        matrix = sos_build_location_matrix(client, [c.item_id for c in components], locations)
-                        df = sos_report_rows_from_components(components, matrix, locations, source_label=selected_item.fullname)
-                    st.session_state['sos_last_report_df'] = df
-                    _sos_mark_live_fetch('Single item', df, f'Live SOS fetch complete. Primary location: {locations[0]}')
-                    st.dataframe(df, use_container_width=True, hide_index=True, height=420)
-                    st.download_button(
-                        'Download single-item CSV',
-                        data=df.to_csv(index=False).encode('utf-8'),
-                        file_name=sos_safe_default_filename(f'{selected_item.fullname}_availability'),
-                        mime='text/csv',
-                        use_container_width=True,
-                        key='sos_single_dl',
-                    )
-
-    with tabs[1]:
-        st.subheader('Batch CSV')
+    with tab2:
+        st.subheader('Batch CSV check')
         uploaded = st.file_uploader('Upload CSV', type=['csv'], key='sos_batch_csv')
-        if st.button('Run batch check', key='sos_run_batch', use_container_width=True):
+        if st.button('Run batch check', key='sos_run_batch'):
             if uploaded is None:
                 st.warning('Upload a CSV first.')
             else:
                 try:
-                    reqs = sos_load_requests_from_csv(uploaded)
+                    with st.spinner('Talking to SOS live API, checking CSV items, and exploding BOMs...'):
+                        reqs = sos_load_requests_from_csv(uploaded)
+                        frames: List[pd.DataFrame] = []
+                        for name, qty in reqs:
+                            rows = sos_bom_rows_from_item(client, name, qty, explode=True)
+                            if rows:
+                                frames.append(sos_rows_to_dataframe(rows, headers, source_label=f'{name} x{qty}'))
+                    if not frames:
+                        _sos_mark_live_fetch('Batch CSV', 0, 0, 'Live SOS batch lookup ran, but no matching items were found from the CSV.')
+                        st.warning('No matching items found from the CSV.')
+                    else:
+                        df = pd.concat(frames, ignore_index=True)
+                        shortage_count = int(pd.to_numeric(df['Short'], errors='coerce').fillna(0).gt(0).sum()) if 'Short' in df.columns else 0
+                        _sos_mark_live_fetch('Batch CSV', len(df), shortage_count, f'Live SOS batch fetch complete. Checked {len(reqs)} CSV lines and returned {len(df)} BOM rows.')
+                        st.success(f'Live SOS batch fetch complete. Rows returned: {len(df)}. Shortage rows: {shortage_count}.')
+                        st.caption(f'Data source: SOS live API • Fetched at: {st.session_state.get("sos_last_fetch_time")}')
+                        st.session_state['sos_last_df'] = df.copy()
+                        st.session_state['sos_last_label'] = 'batch_inventory_check'
+                        st.dataframe(df, use_container_width=True, hide_index=True, height=520)
+                        st.download_button('Download CSV', data=df.to_csv(index=False).encode('utf-8'), file_name='batch_inventory_check.csv', mime='text/csv', key='sos_batch_dl')
                 except Exception as exc:
                     st.error(str(exc))
-                    reqs = []
 
-                dfs: List[pd.DataFrame] = []
-                if reqs:
-                    with st.spinner('Checking batch items against SOS...'):
-                        for name, qty in reqs:
-                            items = client.get_items_by_name(name)
-                            chosen, ambiguity = sos_choose_item_batch(items, name)
-                            if chosen is None:
-                                miss = pd.DataFrame([{
-                                    "Source": name,
-                                    "Part Number": name,
-                                    "Needed": qty,
-                                    "At Primary": 0,
-                                    "Total Available": 0,
-                                    "Short at Primary": qty,
-                                    "Enough at Primary": "❌",
-                                    "Transfer Needed": "",
-                                    "Type": "",
-                                    "Name/Description": "No SOS match",
-                                    "Primary Location": locations[0],
-                                    "Other Locations": "",
-                                    "Location": "",
-                                    "Notes": ambiguity or "No match",
-                                }])
-                                dfs.append(miss)
-                                continue
-                            try:
-                                components = client.bom_lookup(chosen, quantity=int(qty), always_explode=True)
-                                matrix = sos_build_location_matrix(client, [c.item_id for c in components], locations)
-                                one_df = sos_report_rows_from_components(components, matrix, locations, source_label=name)
-                                if ambiguity:
-                                    one_df['Notes'] = one_df['Notes'].astype(str) + (' | ' + ambiguity)
-                                dfs.append(one_df)
-                            except requests.exceptions.ReadTimeout:
-                                timeout_df = pd.DataFrame([{
-                                    "Source": name,
-                                    "Part Number": chosen.fullname,
-                                    "Needed": qty,
-                                    "At Primary": 0,
-                                    "Total Available": 0,
-                                    "Short at Primary": qty,
-                                    "Enough at Primary": "❌",
-                                    "Transfer Needed": "",
-                                    "Type": chosen.type,
-                                    "Name/Description": "Timed out while fetching BOM/components",
-                                    "Primary Location": locations[0],
-                                    "Other Locations": "",
-                                    "Location": "",
-                                    "Notes": "SOS timeout",
-                                }])
-                                dfs.append(timeout_df)
-
-                    if dfs:
-                        df = pd.concat(dfs, ignore_index=True)
-                        st.session_state['sos_last_report_df'] = df
-                        _sos_mark_live_fetch('Batch CSV', df, f'Batch SOS fetch complete. Primary location: {locations[0]}')
-                        st.dataframe(df, use_container_width=True, hide_index=True, height=420)
-                        st.download_button(
-                            'Download batch CSV',
-                            data=df.to_csv(index=False).encode('utf-8'),
-                            file_name=sos_safe_default_filename('sos_batch_report'),
-                            mime='text/csv',
-                            use_container_width=True,
-                            key='sos_batch_dl',
-                        )
-
-    with tabs[2]:
-        st.subheader('Sales Order')
+    with tab3:
+        st.subheader('Sales Order check')
         so_number = st.text_input('Sales order number', key='sos_so_number')
         explode = st.checkbox('Explode subassemblies', value=True, key='sos_so_explode')
-        if st.button('Run sales order check', key='sos_run_so', use_container_width=True):
-            if not so_number.strip():
-                st.warning('Enter a sales order number first.')
-            else:
-                so_obj = client.get_sales_order_by_number(so_number.strip())
-                if not so_obj:
-                    st.error(f'Sales order not found: {so_number}')
+        if st.button('Run sales order check', key='sos_run_so'):
+            try:
+                with st.spinner('Talking to SOS live API, fetching sales order, and syncing BOM lines...'):
+                    df = sos_grouped_sales_order_dataframe(client, so_number.strip(), explode=explode)
+                if df.empty:
+                    _sos_mark_live_fetch('Sales Order', 0, 0, f'Live SOS sales order lookup ran for {so_number.strip()}, but no lines were returned.')
+                    st.warning('No lines found for that sales order.')
                 else:
-                    detail = client.get_sales_order_detail(int(so_obj.get('id')))
-                    reqs = client.sales_order_to_requests(detail)
-                    dfs: List[pd.DataFrame] = []
-                    with st.spinner('Talking to SOS live API, loading the sales order, and exploding BOM demand...'):
-                        for name, qty in reqs:
-                            try:
-                                items = client.get_items_by_name(name)
-                                chosen, ambiguity = sos_choose_item_batch(items, name)
-                                if chosen is None:
-                                    miss = pd.DataFrame([{
-                                        "Source": f"{detail.get('number', so_number)}: {name}",
-                                        "Part Number": name,
-                                        "Needed": qty,
-                                        "At Primary": 0,
-                                        "Total Available": 0,
-                                        "Short at Primary": qty,
-                                        "Enough at Primary": "❌",
-                                        "Transfer Needed": "",
-                                        "Type": "",
-                                        "Name/Description": "No SOS match",
-                                        "Primary Location": locations[0],
-                                        "Other Locations": "",
-                                        "Location": "",
-                                        "Notes": ambiguity or "No match",
-                                    }])
-                                    dfs.append(miss)
-                                    continue
+                    shortage_count = int(pd.to_numeric(df['Short'], errors='coerce').fillna(0).gt(0).sum()) if 'Short' in df.columns else 0
+                    mode_note = 'BOM exploded from SOS assemblies.' if explode else 'Sales order lines fetched without subassembly explosion.'
+                    _sos_mark_live_fetch('Sales Order', len(df), shortage_count, f'Live SOS sales order fetch complete for {so_number.strip()}. {mode_note}')
+                    st.success(f'Live SOS sales order fetch complete. Rows returned: {len(df)}. Shortage rows: {shortage_count}.')
+                    st.caption(f'Data source: SOS live API • Fetched at: {st.session_state.get("sos_last_fetch_time")}')
+                    st.session_state['sos_last_df'] = df.copy()
+                    st.session_state['sos_last_label'] = f'SO_{so_number}_inventory_check'
+                    st.dataframe(df, use_container_width=True, hide_index=True, height=520)
+                    st.download_button('Download CSV', data=df.to_csv(index=False).encode('utf-8'), file_name=sos_safe_default_filename(f'SO_{so_number}_inventory_check'), mime='text/csv', key='sos_so_dl')
+            except Exception as exc:
+                st.error(str(exc))
 
-                                components = client.bom_lookup(chosen, quantity=qty, always_explode=explode)
-                                matrix = sos_build_location_matrix(client, [c.item_id for c in components], locations)
-                                one_df = sos_report_rows_from_components(
-                                    components,
-                                    matrix,
-                                    locations,
-                                    source_label=f"{detail.get('number', so_number)}: {name}",
-                                )
-                                if ambiguity:
-                                    one_df['Notes'] = one_df['Notes'].astype(str) + (' | ' + ambiguity)
-                                dfs.append(one_df)
-                            except requests.exceptions.ReadTimeout:
-                                timeout_df = pd.DataFrame([{
-                                    "Source": f"{detail.get('number', so_number)}: {name}",
-                                    "Part Number": name,
-                                    "Needed": qty,
-                                    "At Primary": 0,
-                                    "Total Available": 0,
-                                    "Short at Primary": qty,
-                                    "Enough at Primary": "❌",
-                                    "Transfer Needed": "",
-                                    "Type": "",
-                                    "Name/Description": "Timed out while fetching BOM/components",
-                                    "Primary Location": locations[0],
-                                    "Other Locations": "",
-                                    "Location": "",
-                                    "Notes": "SOS timeout",
-                                }])
-                                dfs.append(timeout_df)
-                            except Exception as exc:
-                                err_df = pd.DataFrame([{
-                                    "Source": f"{detail.get('number', so_number)}: {name}",
-                                    "Part Number": name,
-                                    "Needed": qty,
-                                    "At Primary": 0,
-                                    "Total Available": 0,
-                                    "Short at Primary": qty,
-                                    "Enough at Primary": "❌",
-                                    "Transfer Needed": "",
-                                    "Type": "",
-                                    "Name/Description": "Error while fetching BOM/components",
-                                    "Primary Location": locations[0],
-                                    "Other Locations": "",
-                                    "Location": "",
-                                    "Notes": str(exc),
-                                }])
-                                dfs.append(err_df)
+    with tab4:
+        render_sos_dashboard_viewer()
 
-                    if dfs:
-                        df = pd.concat(dfs, ignore_index=True)
-                        st.session_state['sos_last_report_df'] = df
-                        _sos_mark_live_fetch(
-                            detail.get('number', so_number),
-                            df,
-                            f"Sales order found, BOM explosion attempted, and location report built. Primary location: {locations[0]}",
-                        )
-                        st.dataframe(df, use_container_width=True, hide_index=True, height=420)
-                        st.download_button(
-                            'Download sales-order CSV',
-                            data=df.to_csv(index=False).encode('utf-8'),
-                            file_name=sos_safe_default_filename(f"{detail.get('number', so_number)}_report"),
-                            mime='text/csv',
-                            use_container_width=True,
-                            key='sos_so_dl',
-                        )
-
-    with tabs[3]:
-        render_sos_dashboard_tab(st.session_state.get('sos_last_report_df', pd.DataFrame()))
-
-    with tabs[4]:
+    with tab5:
         render_sos_help_tab()
-
-
 
 def render_workspace_selector():
     options = ['Derate Reports', 'Arduino Viewer', 'Plot Explorer', 'Label Studio', 'RF Calculator', 'SOS Inventory']

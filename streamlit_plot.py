@@ -1065,23 +1065,39 @@ def render_nabtesco_editor():
         labels_df = parse_nabtesco_labels(active_csv)
         settings = _label_settings_dict(label_width, label_height, font_size, x_offset, y_offset, line_spacing, logo_scale)
         so_for_label = (st.session_state.get('nab_selected_shipment_number') or sales_order or '').strip()
+        customer_po_value = st.session_state.get('nabtesco_customer_po', customer_po).strip()
         with editor_col:
             st.success(f'{len(labels_df)} labels created.')
             with st.expander('Label data', expanded=False):
                 st.dataframe(labels_df, use_container_width=True, height=240)
-            if so_for_label and customer_po.strip():
-                pdf_bytes = build_label_pdf(labels_df, so_for_label, customer_po.strip(), settings)
-                st.download_button('Download label PDF', pdf_bytes, file_name='nabtesco_labels.pdf', mime='application/pdf', use_container_width=True)
+
+            export_ready = bool(so_for_label and customer_po_value)
+            if export_ready:
+                pdf_bytes = build_label_pdf(labels_df, so_for_label, customer_po_value, settings)
+                st.download_button(
+                    'Download label PDF',
+                    pdf_bytes,
+                    file_name='nabtesco_labels.pdf',
+                    mime='application/pdf',
+                    use_container_width=True,
+                    key='nab_download_pdf',
+                )
             else:
-                st.warning('Enter Sales Order/Shipment and Customer Purchase Order to enable the final PDF export.')
+                missing = []
+                if not so_for_label:
+                    missing.append('Sales Order/Shipment')
+                if not customer_po_value:
+                    missing.append('Customer Purchase Order')
+                st.warning('Fill these fields to enable PDF export: ' + ', '.join(missing))
+
         with preview_col:
             st.markdown('#### Preview')
             preview_choice = st.radio('Preview mode', ['Single label', 'Page view'], horizontal=True, key='nab_preview_mode')
             first_label = labels_df.iloc[0].to_dict()
             if preview_choice == 'Single label':
-                st.image(build_label_preview_image(first_label, so_for_label, customer_po.strip(), settings, scale=2), use_container_width=True)
+                st.image(build_label_preview_image(first_label, so_for_label, customer_po_value, settings, scale=2), use_container_width=True)
             else:
-                st.image(build_page_preview_image(labels_df, so_for_label, customer_po.strip(), settings, max_labels=preview_count, scale=1), use_container_width=True)
+                st.image(build_page_preview_image(labels_df, so_for_label, customer_po_value, settings, max_labels=preview_count, scale=1), use_container_width=True)
     except Exception as e:
         with preview_col:
             st.error(f'Failed to build labels: {e}')

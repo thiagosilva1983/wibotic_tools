@@ -1209,6 +1209,15 @@ def sos_trim_text(s: str, n: int = 45) -> str:
     return s if len(s) <= n else s[: n - 3] + "..."
 
 
+def sos_to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value in (None, ""):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
 def sos_buildability_summary(parent_item: SOSLineItem, rows: List[List[str]]) -> Dict[str, Any]:
     assembly_on_hand = int(getattr(parent_item, "on_hand", 0) or 0)
     assembly_location = sos_extract_location(getattr(parent_item, "notes", "") or "")
@@ -1218,6 +1227,7 @@ def sos_buildability_summary(parent_item: SOSLineItem, rows: List[List[str]]) ->
         return {
             "assembly_on_hand": assembly_on_hand,
             "assembly_location": assembly_location_display,
+            "assembly_purchase_cost": sos_to_float(getattr(parent_item, "purchase_cost", 0), 0.0),
             "buildable_from_parts": 0,
             "potential_total": assembly_on_hand,
             "limiting_parts": "",
@@ -1239,6 +1249,7 @@ def sos_buildability_summary(parent_item: SOSLineItem, rows: List[List[str]]) ->
         return {
             "assembly_on_hand": assembly_on_hand,
             "assembly_location": assembly_location_display,
+            "assembly_purchase_cost": sos_to_float(getattr(parent_item, "purchase_cost", 0), 0.0),
             "buildable_from_parts": 0,
             "potential_total": assembly_on_hand,
             "limiting_parts": "",
@@ -1249,6 +1260,7 @@ def sos_buildability_summary(parent_item: SOSLineItem, rows: List[List[str]]) ->
     return {
         "assembly_on_hand": assembly_on_hand,
         "assembly_location": assembly_location_display,
+        "assembly_purchase_cost": sos_to_float(getattr(parent_item, "purchase_cost", 0), 0.0),
         "buildable_from_parts": int(min_buildable),
         "potential_total": int(assembly_on_hand + min_buildable),
         "limiting_parts": ", ".join(limiting_parts),
@@ -1528,11 +1540,11 @@ class SOSReadonlyClient:
             return []
         as_str = ",".join(str(i) for i in ids)
         items = self._get("item", params={"ids": as_str}).get("data", [])
-        return [SOSLineItem(item_id=item["id"], on_hand=item["onhand"], type=item["type"], quantity=1, fullname=item["fullname"], description=item.get("description", ""), has_serial=item.get("serialTracking", False), notes=item.get("notes", "")) for item in items]
+        return [SOSLineItem(item_id=item["id"], on_hand=item["onhand"], type=item["type"], quantity=1, fullname=item["fullname"], description=item.get("description", ""), has_serial=item.get("serialTracking", False), notes=item.get("notes", ""), purchase_cost=sos_to_float(item.get("purchaseCost", item.get("cost", 0)), 0.0)) for item in items]
 
     def get_items_by_name(self, name: str) -> List[SOSLineItem]:
         items = self._get("item", params={"query": name}).get("data", [])
-        return [SOSLineItem(item_id=item["id"], on_hand=item["onhand"], type=item["type"], quantity=1, fullname=item["fullname"], description=item.get("description", ""), has_serial=item.get("serialTracking", False), notes=item.get("notes", "")) for item in items]
+        return [SOSLineItem(item_id=item["id"], on_hand=item["onhand"], type=item["type"], quantity=1, fullname=item["fullname"], description=item.get("description", ""), has_serial=item.get("serialTracking", False), notes=item.get("notes", ""), purchase_cost=sos_to_float(item.get("purchaseCost", item.get("cost", 0)), 0.0)) for item in items]
 
     def get_single_level_bom(self, item_id: int, assembly_quantity: int) -> List[SOSLineItem]:
         try:
@@ -1957,11 +1969,12 @@ SOS_REDIRECT_URI="https://your-app.streamlit.app/""" , language='toml')
                         st.caption(f'Data source: SOS live API • Fetched at: {st.session_state.get("sos_last_fetch_time")}')
                         st.session_state['sos_last_df'] = df.copy()
                         st.session_state['sos_last_label'] = f'Single_{selected_item.fullname}_x{single_qty}'
-                        csum1, csum2, csum3, csum4 = st.columns(4)
+                        csum1, csum2, csum3, csum4, csum5 = st.columns(5)
                         csum1.metric('Assembly on hand', build_summary['assembly_on_hand'])
                         csum2.metric('Assembly location', build_summary['assembly_location'])
-                        csum3.metric('Buildable from parts', build_summary['buildable_from_parts'])
-                        csum4.metric('Potential total', build_summary['potential_total'])
+                        csum3.metric('Purchase cost', f"{build_summary['assembly_purchase_cost']:.2f}")
+                        csum4.metric('Buildable from parts', build_summary['buildable_from_parts'])
+                        csum5.metric('Potential total', build_summary['potential_total'])
                         if build_summary['limiting_parts']:
                             st.caption(f"Limiting part(s): {build_summary['limiting_parts']}")
                         st.dataframe(df, use_container_width=True, hide_index=True, height=460)

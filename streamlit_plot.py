@@ -1970,12 +1970,15 @@ SOS_REDIRECT_URI="https://your-app.streamlit.app/""" , language='toml')
                         st.caption(f'Data source: SOS live API • Fetched at: {st.session_state.get("sos_last_fetch_time")}')
                         st.session_state['sos_last_df'] = df.copy()
                         st.session_state['sos_last_label'] = f'Single_{selected_item.fullname}_x{single_qty}'
-                        csum1, csum2, csum3, csum4, csum5 = st.columns(5)
+                        csum1, csum2 = st.columns([1, 2])
                         csum1.metric('Assembly on hand', build_summary['assembly_on_hand'])
                         csum2.metric('Assembly location', build_summary['assembly_location'])
-                        csum3.metric('Purchase cost', f"{build_summary['assembly_purchase_cost']:.2f}")
-                        csum4.metric('Buildable from parts', build_summary['buildable_from_parts'])
-                        csum5.metric('Potential total', build_summary['potential_total'])
+
+                        csum3, csum4, csum5 = st.columns(3)
+                        csum3.metric('Buildable from parts', build_summary['buildable_from_parts'])
+                        csum4.metric('Potential total', build_summary['potential_total'])
+                        csum5.metric('Purchase cost', f"{build_summary['assembly_purchase_cost']:.2f}")
+
                         if build_summary['limiting_parts']:
                             st.caption(f"Limiting part(s): {build_summary['limiting_parts']}")
                         st.dataframe(df, use_container_width=True, hide_index=True, height=460)

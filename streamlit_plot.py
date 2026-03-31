@@ -17,6 +17,11 @@ import csv
 import tempfile
 import os
 from collections import Counter
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlencode
+
+import requests
 
 st.set_page_config(page_title='Derated + Arduino + Plot', layout='wide')
 
@@ -1060,51 +1065,655 @@ def render_jabil_editor():
 
 
 
-def _workspace_intro(title, subtitle):
-    st.markdown(f"### {title}")
-    if subtitle:
-        st.caption(subtitle)
+# -----------------------------
+# SOS read-only workspace
+# -----------------------------
+SOS_BASE_URL = "https://api.sosinventory.com/api/v2/"
+SOS_AUTH_URL = "https://api.sosinventory.com/oauth2/authorize"
+SOS_TOKEN_URL = "https://api.sosinventory.com/oauth2/token"
+SOS_SAFE_FILENAME = re.compile(r"[^a-zA-Z0-9_-]+")
+SOS_LOCATION_RE = re.compile(r"(Aisle\s*[^,|]+?(?:,\s*Shelf\s*[^,|]+)?)", re.IGNORECASE)
 
 
-def _metric_cards(items):
-    cols = st.columns(len(items)) if items else []
-    for col, item in zip(cols, items):
-        if len(item) == 3:
-            label, value, help_text = item
-        elif len(item) == 2:
-            label, value = item
-            help_text = None
-        else:
-            label = str(item)
-            value = ''
-            help_text = None
-        col.metric(label, value, help=help_text)
+@dataclass
+class SOSLineItem:
+    item_id: int
+    on_hand: int
+    type: str
+    quantity: float
+    fullname: str
+    description: str
+    has_serial: bool
+    serial: Optional[str] = None
+    notes: str = ""
 
-def render_app_header():
-    st.markdown(
-        f"""
-        <div class="wibotic-watermark"></div>
-        <div class="wibotic-hero">
-            <div class="wibotic-hero__logo">
-                <img src="data:image/png;base64,{LOGO_B64}" alt="Wibotic logo" />
-            </div>
-            <h1 class="wibotic-hero__title">Wibotic Tools Dashboard</h1>
-            <p class="wibotic-hero__subtitle">Derating analysis, Arduino temperature review, plotting, labels, and RF calculations in one polished workspace.</p>
-            <div class="wibotic-badges">
-                <span class="wibotic-badge">Derate</span>
-                <span class="wibotic-badge">Arduino</span>
-                <span class="wibotic-badge">Plot</span>
-                <span class="wibotic-badge">Label</span>
-                <span class="wibotic-badge">RF Calculator</span>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+
+class SOSAuthError(Exception):
+    pass
+
+
+def sos_safe_default_filename(title: str) -> str:
+    safe = SOS_SAFE_FILENAME.sub("_", (title or "").strip()).strip("_")
+    safe = safe[:60] if safe else "report"
+    return safe + ".csv"
+
+
+def sos_extract_location(notes: str) -> str:
+    if not notes:
+        return ""
+    m = SOS_LOCATION_RE.search(notes)
+    return m.group(1).strip() if m else ""
+
+
+def sos_trim_text(s: str, n: int = 45) -> str:
+    s = (s or "").strip()
+    return s if len(s) <= n else s[: n - 3] + "..."
+
+
+def sos_pick_best_item(items: List[SOSLineItem], query_name: str) -> Optional[SOSLineItem]:
+    if not items:
+        return None
+    for item in items:
+        if item.fullname == query_name:
+            return item
+    return items[0]
+
+
+def sos_load_requests_from_csv(uploaded_file) -> List[Tuple[str, int]]:
+    uploaded_file.seek(0)
+    wrapper = io.TextIOWrapper(uploaded_file, encoding="utf-8", newline="")
+    reader = csv.DictReader(wrapper)
+    header_map = {h.lower().strip(): h for h in (reader.fieldnames or [])}
+
+    def find_header(*candidates: str) -> Optional[str]:
+        for c in candidates:
+            key = c.lower().strip()
+            if key in header_map:
+                return header_map[key]
+        return None
+
+    name_col = find_header("Item Name", "ItemName", "Part Name", "Name", "Item Number", "Part Number", "PN")
+    qty_col = find_header("quantity", "qty", "QTY", "Quantity")
+    if not name_col or not qty_col:
+        raise ValueError(f"CSV headers missing. Found: {list(header_map.keys())}")
+
+    rows: List[Tuple[str, int]] = []
+    for row in reader:
+        name = (row.get(name_col) or "").strip()
+        if not name:
+            continue
+        try:
+            qty = int(row.get(qty_col) or 1)
+        except Exception:
+            qty = 1
+        rows.append((name, qty))
+
+    uploaded_file.seek(0)
+    return rows
+
+
+def sos_get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
+    try:
+        value = st.secrets[name]
+        return str(value) if value is not None else default
+    except Exception:
+        return os.environ.get(name, default)
+
+
+def sos_build_auth_url() -> Optional[str]:
+    client_id = sos_get_secret("SOS_CLIENT_ID")
+    redirect_uri = sos_get_secret("SOS_REDIRECT_URI")
+    if not client_id or not redirect_uri:
+        return None
+    params = {"response_type": "code", "client_id": client_id, "redirect_uri": redirect_uri}
+    return f"{SOS_AUTH_URL}?{urlencode(params)}"
+
+
+def sos_exchange_code_for_token(code: str) -> dict:
+    client_id = sos_get_secret("SOS_CLIENT_ID")
+    client_secret = sos_get_secret("SOS_CLIENT_SECRET")
+    redirect_uri = sos_get_secret("SOS_REDIRECT_URI")
+    if not client_id or not client_secret or not redirect_uri:
+        raise SOSAuthError("Missing SOS_CLIENT_ID, SOS_CLIENT_SECRET, or SOS_REDIRECT_URI in secrets.")
+
+    data = {
+        "grant_type": "authorization_code",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "code": code,
+        "redirect_uri": redirect_uri,
+    }
+    resp = requests.post(
+        SOS_TOKEN_URL,
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Host": "api.sosinventory.com"},
+        data=data,
+        timeout=30,
+    )
+    payload = resp.json()
+    if not resp.ok or "access_token" not in payload:
+        raise SOSAuthError(f"Token exchange failed: {payload}")
+    return payload
+
+
+def sos_refresh_token(refresh_token_value: str) -> dict:
+    data = {"grant_type": "refresh_token", "refresh_token": refresh_token_value}
+    resp = requests.post(
+        SOS_TOKEN_URL,
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Host": "api.sosinventory.com"},
+        data=data,
+        timeout=30,
+    )
+    payload = resp.json()
+    if not resp.ok or "access_token" not in payload:
+        raise SOSAuthError(f"Refresh failed: {payload}")
+    return payload
+
+
+class SOSReadonlyClient:
+    def __init__(self, access_token: str):
+        self.headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Host": "api.sosinventory.com",
+            "Authorization": f"Bearer {access_token}",
+        }
+
+    def _get(self, endpoint: str, params: Optional[dict] = None, allowable_attempts: int = 4) -> dict:
+        attempts = 0
+        last_json: dict = {}
+        while attempts < allowable_attempts:
+            attempts += 1
+            resp = requests.get(SOS_BASE_URL + endpoint, headers=self.headers, params=params, timeout=50)
+            try:
+                last_json = resp.json()
+            except Exception:
+                last_json = {"status": "error", "message": resp.text or "", "code": resp.status_code}
+
+            if "throttle" in str(last_json.get("message", "")).lower():
+                continue
+            if resp.ok:
+                return last_json
+            if resp.status_code == 400:
+                if "throttle" in str(last_json.get("message", "")).lower():
+                    continue
+                if last_json.get("status", "") == "invalid":
+                    return last_json
+            if resp.status_code == 404:
+                raise ValueError(404)
+            raise RuntimeError(f"SOS GET failed ({resp.status_code}): {last_json.get('message', resp.text)}")
+        return last_json
+
+    def get_sales_orders(self, query: str, maxresults: int = 20) -> List[Dict[str, Any]]:
+        resp = self._get("salesorder", params={"query": query, "maxresults": maxresults})
+        return resp.get("data", []) or []
+
+    def get_sales_order_by_number(self, so_number: str) -> Optional[Dict[str, Any]]:
+        matches = self.get_sales_orders(so_number, maxresults=50)
+        if not matches:
+            return None
+        so_number_l = so_number.strip().lower()
+        for so in matches:
+            num = (so.get("number") or "").strip().lower()
+            if num == so_number_l:
+                return so
+        return matches[0]
+
+    def get_sales_order_detail(self, so_id: int) -> Dict[str, Any]:
+        resp = self._get(f"salesorder/{int(so_id)}")
+        return resp.get("data", {}) or {}
+
+    @staticmethod
+    def extract_sales_order_lines(so_detail: Dict[str, Any]) -> List[Dict[str, Any]]:
+        for key in ("lines", "lineItems", "items", "salesOrderLines"):
+            if isinstance(so_detail.get(key), list):
+                return so_detail[key]
+        return []
+
+    def sales_order_to_requests(self, so_detail: Dict[str, Any]) -> List[Tuple[str, int]]:
+        lines = self.extract_sales_order_lines(so_detail)
+        reqs: List[Tuple[str, int]] = []
+        for ln in lines:
+            qty = ln.get("quantity") or ln.get("qty") or 1
+            try:
+                qty_i = int(qty)
+            except Exception:
+                qty_i = 1
+            item_obj = ln.get("item") or {}
+            name = item_obj.get("name") or item_obj.get("fullname") or ln.get("itemName") or ln.get("name") or ""
+            name = str(name).strip()
+            if not name:
+                name = str(ln.get("description") or "").strip()
+            if name:
+                reqs.append((name, qty_i))
+        return reqs
+
+    def get_items_by_id(self, ids: List[int]) -> List[SOSLineItem]:
+        if not ids:
+            return []
+        as_str = ",".join(str(i) for i in ids)
+        items = self._get("item", params={"ids": as_str}).get("data", [])
+        return [SOSLineItem(item_id=item["id"], on_hand=item["onhand"], type=item["type"], quantity=1, fullname=item["fullname"], description=item.get("description", ""), has_serial=item.get("serialTracking", False), notes=item.get("notes", "")) for item in items]
+
+    def get_items_by_name(self, name: str) -> List[SOSLineItem]:
+        items = self._get("item", params={"query": name}).get("data", [])
+        return [SOSLineItem(item_id=item["id"], on_hand=item["onhand"], type=item["type"], quantity=1, fullname=item["fullname"], description=item.get("description", ""), has_serial=item.get("serialTracking", False), notes=item.get("notes", "")) for item in items]
+
+    def get_single_level_bom(self, item_id: int, assembly_quantity: int) -> List[SOSLineItem]:
+        try:
+            resp = self._get(f"item/{int(item_id)}/bom")
+        except ValueError as e:
+            if str(e) == "404":
+                return []
+            raise
+        lines = (resp.get("data") or {}).get("lines", []) or []
+        if not lines:
+            return []
+        bom_ids = [e["componentItem"]["id"] for e in lines if e.get("componentItem")]
+        bom_data = self.get_items_by_id(bom_ids)
+        for bom_item in bom_data:
+            item_build_data = next(e for e in lines if e["componentItem"]["id"] == bom_item.item_id)
+            bom_item.quantity = item_build_data["quantity"] * assembly_quantity
+        return bom_data
+
+    def bom_lookup(self, item: SOSLineItem, quantity: int = 1, always_explode: bool = True) -> List[SOSLineItem]:
+        line_items: List[SOSLineItem] = []
+        assemblies = [{"item_id": item.item_id, "quantity": quantity}]
+
+        def has_subassembly(e: SOSLineItem) -> bool:
+            return (e.type or "").lower() in ["assembly", "item group"]
+
+        while assemblies:
+            assembly = assemblies.pop()
+            bom_data = self.get_single_level_bom(int(assembly["item_id"]), int(assembly["quantity"]))
+            if not bom_data:
+                item_self = self.get_items_by_id([int(assembly["item_id"])])[0]
+                item_self.quantity = float(assembly["quantity"])
+                existing = next((x for x in line_items if x.fullname == item_self.fullname), None)
+                if existing:
+                    existing.quantity += item_self.quantity
+                else:
+                    line_items.append(item_self)
+                continue
+            for bom_item in bom_data:
+                if has_subassembly(bom_item) and always_explode:
+                    assemblies.append({"item_id": bom_item.item_id, "quantity": bom_item.quantity})
+                    continue
+                existing = next((x for x in line_items if x.fullname == bom_item.fullname), None)
+                if existing:
+                    existing.quantity += bom_item.quantity
+                else:
+                    line_items.append(bom_item)
+        return line_items
+
+
+def sos_get_authenticated_client() -> Tuple[Optional[SOSReadonlyClient], str]:
+    if "sos_access_token" in st.session_state:
+        return SOSReadonlyClient(st.session_state["sos_access_token"]), "Connected (session token)"
+
+    refresh_value = sos_get_secret("SOS_REFRESH_TOKEN")
+    if refresh_value:
+        payload = sos_refresh_token(refresh_value)
+        st.session_state["sos_access_token"] = payload["access_token"]
+        if payload.get("refresh_token"):
+            st.session_state["sos_refresh_token_latest"] = payload["refresh_token"]
+        return SOSReadonlyClient(payload["access_token"]), "Connected (refreshed from secrets)"
+
+    access_value = sos_get_secret("SOS_ACCESS_TOKEN")
+    if access_value:
+        st.session_state["sos_access_token"] = access_value
+        return SOSReadonlyClient(access_value), "Connected (access token from secrets)"
+
+    qp = st.query_params
+    code = qp.get("code")
+    if code:
+        payload = sos_exchange_code_for_token(code)
+        st.session_state["sos_access_token"] = payload["access_token"]
+        if payload.get("refresh_token"):
+            st.session_state["sos_refresh_token_latest"] = payload["refresh_token"]
+        try:
+            del st.query_params["code"]
+        except Exception:
+            pass
+        return SOSReadonlyClient(payload["access_token"]), "Connected (OAuth code exchange)"
+
+    return None, "Not connected"
+
+
+def sos_bom_rows_from_item(client: SOSReadonlyClient, name: str, qty: int, explode: bool = True) -> List[List[str]]:
+    items = client.get_items_by_name(name)
+    if not items:
+        return []
+    item = sos_pick_best_item(items, name)
+    if item is None:
+        return []
+    bom = client.bom_lookup(item, quantity=qty, always_explode=True) if explode else [item]
+    rows: List[List[str]] = []
+    for bi in bom:
+        needed = int(bi.quantity)
+        onhand = int(bi.on_hand)
+        short = max(needed - onhand, 0)
+        enough = "✅" if short == 0 else "❌"
+        rows.append([bi.fullname, enough, str(needed), str(onhand), str(short), bi.type, bi.description, sos_extract_location(bi.notes or ""), sos_trim_text(bi.notes or "", 45)])
+    return rows
+
+
+def sos_rows_to_dataframe(rows: List[List[str]], headers: List[str], source_label: Optional[str] = None) -> pd.DataFrame:
+    data_rows = []
+    for row in rows:
+        data_rows.append(row if source_label is None else [source_label] + row)
+    if source_label is None:
+        return pd.DataFrame(data_rows, columns=headers)
+    return pd.DataFrame(data_rows, columns=["Assembly / SO Line"] + headers)
+
+
+def sos_grouped_sales_order_dataframe(client: SOSReadonlyClient, so_number: str, explode: bool) -> pd.DataFrame:
+    so_obj = client.get_sales_order_by_number(so_number)
+    if not so_obj:
+        raise ValueError(f"Sales order not found: {so_number}")
+    so_id = so_obj.get("id")
+    if not so_id:
+        raise ValueError(f"Sales order missing id: {so_obj}")
+    so_detail = client.get_sales_order_detail(int(so_id))
+    reqs = client.sales_order_to_requests(so_detail)
+    headers = ["Part Number", "Enough", "Needed", "On Hand", "Short", "Type", "Name/Description", "Location", "Notes"]
+    frames: List[pd.DataFrame] = []
+    for name, qty in reqs:
+        rows = sos_bom_rows_from_item(client, name, qty, explode=explode)
+        if rows:
+            frames.append(sos_rows_to_dataframe(rows, headers, source_label=f"{name} x{qty}"))
+    if not frames:
+        return pd.DataFrame(columns=["Assembly / SO Line"] + headers)
+    return pd.concat(frames, ignore_index=True)
+
+
+def render_sos_dashboard_viewer():
+    st.subheader('Dashboard / CSV viewer')
+    df = st.session_state.get('sos_last_df')
+    label = st.session_state.get('sos_last_label', 'Current result')
+    if df is None or getattr(df, 'empty', True):
+        st.info('Run a Single, Batch CSV, or Sales Order check first. The result will appear here for filtering, summaries, and export.')
+        return
+
+    st.caption(f'Viewing: {label}')
+    work = df.copy()
+
+    fc1, fc2, fc3, fc4 = st.columns([1.2, 1.2, 1.4, 1.0])
+    with fc1:
+        short_only = st.checkbox('Shortages only', value=False, key='sos_dash_short_only')
+    with fc2:
+        search_text = st.text_input('Search PN / description', key='sos_dash_search')
+    with fc3:
+        locations = ['(all)'] + sorted([str(x) for x in work.get('Location', pd.Series(dtype=str)).fillna('').replace('', '(blank)').unique().tolist()]) if 'Location' in work.columns else ['(all)']
+        selected_location = st.selectbox('Location', locations, key='sos_dash_location')
+    with fc4:
+        source_options = ['(all)'] + sorted([str(x) for x in work.get('Assembly / SO Line', pd.Series(dtype=str)).fillna('').unique().tolist()]) if 'Assembly / SO Line' in work.columns else ['(all)']
+        selected_source = st.selectbox('Source', source_options, key='sos_dash_source')
+
+    if short_only and 'Short' in work.columns:
+        short_num = pd.to_numeric(work['Short'], errors='coerce').fillna(0)
+        work = work[short_num > 0].copy()
+    if search_text:
+        mask = pd.Series(False, index=work.index)
+        for col in [c for c in ['Part Number', 'Name/Description', 'Notes', 'Assembly / SO Line'] if c in work.columns]:
+            mask = mask | work[col].astype(str).str.contains(search_text, case=False, na=False)
+        work = work[mask].copy()
+    if selected_location != '(all)' and 'Location' in work.columns:
+        loc_series = work['Location'].fillna('').replace('', '(blank)')
+        work = work[loc_series == selected_location].copy()
+    if selected_source != '(all)' and 'Assembly / SO Line' in work.columns:
+        work = work[work['Assembly / SO Line'].astype(str) == selected_source].copy()
+
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric('Rows', len(work))
+    with m2:
+        if 'Part Number' in work.columns:
+            st.metric('Unique parts', int(work['Part Number'].astype(str).nunique()))
+    with m3:
+        if 'Short' in work.columns:
+            st.metric('Total short', int(pd.to_numeric(work['Short'], errors='coerce').fillna(0).sum()))
+    with m4:
+        if 'Assembly / SO Line' in work.columns:
+            st.metric('Sources', int(work['Assembly / SO Line'].astype(str).nunique()))
+
+    if work.empty:
+        st.warning('No rows match the current filters.')
+        return
+
+    st.dataframe(work, use_container_width=True, hide_index=True, height=420)
+    st.download_button(
+        'Download filtered CSV',
+        data=work.to_csv(index=False).encode('utf-8'),
+        file_name=sos_safe_default_filename(f'{label}_filtered'),
+        mime='text/csv',
+        key='sos_dash_dl',
     )
 
+    s1, s2 = st.columns(2)
+    with s1:
+        if 'Part Number' in work.columns and 'Short' in work.columns:
+            by_part = (
+                work.assign(Short_num=pd.to_numeric(work['Short'], errors='coerce').fillna(0), Needed_num=pd.to_numeric(work.get('Needed', 0), errors='coerce').fillna(0))
+                .groupby('Part Number', as_index=False)
+                .agg(Short_Total=('Short_num', 'sum'), Needed_Total=('Needed_num', 'sum'), Lines=('Part Number', 'count'))
+                .sort_values(['Short_Total', 'Needed_Total'], ascending=False)
+            )
+            st.markdown('**Summary by part**')
+            st.dataframe(by_part, use_container_width=True, hide_index=True, height=260)
+    with s2:
+        if 'Location' in work.columns and 'Short' in work.columns:
+            loc = work.copy()
+            loc['Location'] = loc['Location'].fillna('').replace('', '(blank)')
+            by_loc = (
+                loc.assign(Short_num=pd.to_numeric(loc['Short'], errors='coerce').fillna(0))
+                .groupby('Location', as_index=False)
+                .agg(Short_Total=('Short_num', 'sum'), UniqueParts=('Part Number', 'nunique') if 'Part Number' in loc.columns else ('Location', 'count'), Lines=('Location', 'count'))
+                .sort_values(['Short_Total', 'Lines'], ascending=False)
+            )
+            st.markdown('**Summary by location**')
+            st.dataframe(by_loc, use_container_width=True, hide_index=True, height=260)
+
+
+
+
+def render_sos_help_tab():
+    st.subheader('Help / How to use SOS')
+    st.markdown("""
+Use this workspace to check **live SOS inventory and BOM availability** without changing anything in SOS.
+
+**Single**
+- Enter one exact item or part name.
+- Choose a quantity.
+- Click **Run single check**.
+- The app looks up the item in SOS and explodes the BOM.
+
+**Batch CSV**
+- Upload a CSV with an item column and a quantity column.
+- Supported item headers: `Item Name`, `ItemName`, `Part Name`, `Name`, `Item Number`, `Part Number`, `PN`
+- Supported quantity headers: `Quantity`, `quantity`, `qty`, `QTY`
+- Click **Run batch check**.
+
+**Sales Order**
+- Enter the SOS sales order number.
+- Leave **Explode subassemblies** checked to sync full BOM demand.
+- Click **Run sales order check**.
+
+**Dashboard**
+- Review the last result on-page.
+- Filter shortages, search part numbers, and export the filtered CSV.
+
+**Safety**
+- This workspace is read-only.
+- It checks live SOS data but does not create builds and does not write back to SOS.
+""")
+
+    template_df = pd.DataFrame([
+        {'Part Number': '130-000101 Rev C', 'Quantity': 2},
+        {'Part Number': '330-000038', 'Quantity': 12},
+        {'Part Number': '720-000141', 'Quantity': 4},
+    ])
+    template_bytes = template_df.to_csv(index=False).encode('utf-8')
+
+    st.markdown('**CSV template example**')
+    st.dataframe(template_df, use_container_width=True, hide_index=True)
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.download_button(
+            'Download CSV template',
+            data=template_bytes,
+            file_name='sos_batch_template.csv',
+            mime='text/csv',
+            key='sos_template_dl',
+            use_container_width=True,
+        )
+    with c2:
+        st.caption('You can use `Part Number` or any of the supported item-name headers. Quantities should be whole numbers.')
+
+def render_sos_workspace():
+    st.subheader('SOS Inventory')
+    st.caption('Read-only SOS inventory, BOM, and sales-order checks. No POST, no PUT, no build creation.')
+
+    def _sos_mark_live_fetch(source: str, rows_count: int, shortage_count: int, note: str = ''):
+        st.session_state['sos_last_fetch_time'] = pd.Timestamp.now().strftime('%Y-%m-%d %I:%M:%S %p')
+        st.session_state['sos_last_source'] = source
+        st.session_state['sos_last_rows'] = int(rows_count)
+        st.session_state['sos_last_shortages'] = int(shortage_count)
+        st.session_state['sos_last_note'] = note
+
+    auth_url = sos_build_auth_url()
+    with st.expander('SOS connection', expanded=True):
+        c1, c2 = st.columns([1, 2])
+        client: Optional[SOSReadonlyClient] = None
+        status_text = 'Not connected'
+        try:
+            client, status_text = sos_get_authenticated_client()
+        except Exception as exc:
+            st.error(f'SOS authentication failed: {exc}')
+        with c1:
+            st.metric('Connection', 'Ready' if client else 'Not ready')
+        with c2:
+            st.write(status_text)
+            if auth_url:
+                st.markdown(f'[Connect to SOS]({auth_url})')
+            else:
+                st.info('OAuth link appears after SOS_CLIENT_ID and SOS_REDIRECT_URI are added to secrets.')
+            if 'sos_refresh_token_latest' in st.session_state:
+                latest = st.session_state['sos_refresh_token_latest']
+                masked = latest[:8] + '...' + latest[-8:] if isinstance(latest, str) and len(latest) > 20 else 'Hidden'
+                st.info('A new refresh token was returned. Replace the old SOS_REFRESH_TOKEN in your secrets after testing.')
+                st.caption(f'New token received: {masked}')
+        cc1, cc2 = st.columns([1, 3])
+        if cc1.button('Forget SOS session token', key='forget_sos_session_btn'):
+            for key in ['sos_access_token', 'sos_refresh_token_latest']:
+                st.session_state.pop(key, None)
+            st.rerun()
+        with cc2.expander('Hosted secrets template'):
+            st.code("""SOS_REFRESH_TOKEN="..."
+SOS_CLIENT_ID="..."
+SOS_CLIENT_SECRET="..."
+SOS_REDIRECT_URI="https://your-app.streamlit.app/""" , language='toml')
+
+    if client is None:
+        st.warning('Add SOS secrets first. The workspace is ready, but it cannot talk to SOS until a refresh token or OAuth secrets are available.')
+        return
+
+    st.markdown('#### Live SOS status')
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric('Source', st.session_state.get('sos_last_source', 'Connected to live SOS'))
+    m2.metric('Last sync', st.session_state.get('sos_last_fetch_time', 'Not run yet'))
+    m3.metric('Rows returned', st.session_state.get('sos_last_rows', 0))
+    m4.metric('Shortages', st.session_state.get('sos_last_shortages', 0))
+    st.caption(st.session_state.get('sos_last_note', 'Run a check to confirm live SOS fetch and BOM explosion activity.'))
+
+    headers = ['Part Number', 'Enough', 'Needed', 'On Hand', 'Short', 'Type', 'Name/Description', 'Location', 'Notes']
+    tab0, tab1, tab2, tab3, tab4 = st.tabs(['Help', 'Single', 'Batch CSV', 'Sales Order', 'Dashboard'])
+
+    with tab0:
+        render_sos_help_tab()
+
+    with tab1:
+        st.subheader('Single item check')
+        single_name = st.text_input('Item name', key='sos_single_name')
+        single_qty = st.number_input('Quantity', min_value=1, value=1, step=1, key='sos_single_qty')
+        if st.button('Run single check', key='sos_run_single'):
+            try:
+                with st.spinner('Talking to SOS live API, finding item, and exploding BOM...'):
+                    rows = sos_bom_rows_from_item(client, single_name.strip(), int(single_qty), explode=True)
+                if not rows:
+                    _sos_mark_live_fetch('Single item', 0, 0, 'Live SOS lookup ran, but no matching item was found.')
+                    st.warning('No item found.')
+                else:
+                    df = sos_rows_to_dataframe(rows, headers)
+                    shortage_count = int(pd.to_numeric(df['Short'], errors='coerce').fillna(0).gt(0).sum()) if 'Short' in df.columns else 0
+                    _sos_mark_live_fetch('Single item', len(df), shortage_count, f'Live SOS fetch complete. BOM exploded for {single_name.strip()} x{int(single_qty)}.')
+                    st.success(f'Live SOS fetch complete. BOM rows returned: {len(df)}. Shortage rows: {shortage_count}.')
+                    st.caption(f'Data source: SOS live API • Fetched at: {st.session_state.get("sos_last_fetch_time")}')
+                    st.session_state['sos_last_df'] = df.copy()
+                    st.session_state['sos_last_label'] = f'Single_{single_name}_x{single_qty}'
+                    st.dataframe(df, use_container_width=True, hide_index=True, height=460)
+                    st.download_button('Download CSV', data=df.to_csv(index=False).encode('utf-8'), file_name=sos_safe_default_filename(f'Single_{single_name}_x{single_qty}'), mime='text/csv', key='sos_single_dl')
+            except Exception as exc:
+                st.error(str(exc))
+
+    with tab2:
+        st.subheader('Batch CSV check')
+        uploaded = st.file_uploader('Upload CSV', type=['csv'], key='sos_batch_csv')
+        if st.button('Run batch check', key='sos_run_batch'):
+            if uploaded is None:
+                st.warning('Upload a CSV first.')
+            else:
+                try:
+                    with st.spinner('Talking to SOS live API, checking CSV items, and exploding BOMs...'):
+                        reqs = sos_load_requests_from_csv(uploaded)
+                        frames: List[pd.DataFrame] = []
+                        for name, qty in reqs:
+                            rows = sos_bom_rows_from_item(client, name, qty, explode=True)
+                            if rows:
+                                frames.append(sos_rows_to_dataframe(rows, headers, source_label=f'{name} x{qty}'))
+                    if not frames:
+                        _sos_mark_live_fetch('Batch CSV', 0, 0, 'Live SOS batch lookup ran, but no matching items were found from the CSV.')
+                        st.warning('No matching items found from the CSV.')
+                    else:
+                        df = pd.concat(frames, ignore_index=True)
+                        shortage_count = int(pd.to_numeric(df['Short'], errors='coerce').fillna(0).gt(0).sum()) if 'Short' in df.columns else 0
+                        _sos_mark_live_fetch('Batch CSV', len(df), shortage_count, f'Live SOS batch fetch complete. Checked {len(reqs)} CSV lines and returned {len(df)} BOM rows.')
+                        st.success(f'Live SOS batch fetch complete. Rows returned: {len(df)}. Shortage rows: {shortage_count}.')
+                        st.caption(f'Data source: SOS live API • Fetched at: {st.session_state.get("sos_last_fetch_time")}')
+                        st.session_state['sos_last_df'] = df.copy()
+                        st.session_state['sos_last_label'] = 'batch_inventory_check'
+                        st.dataframe(df, use_container_width=True, hide_index=True, height=520)
+                        st.download_button('Download CSV', data=df.to_csv(index=False).encode('utf-8'), file_name='batch_inventory_check.csv', mime='text/csv', key='sos_batch_dl')
+                except Exception as exc:
+                    st.error(str(exc))
+
+    with tab3:
+        st.subheader('Sales Order check')
+        so_number = st.text_input('Sales order number', key='sos_so_number')
+        explode = st.checkbox('Explode subassemblies', value=True, key='sos_so_explode')
+        if st.button('Run sales order check', key='sos_run_so'):
+            try:
+                with st.spinner('Talking to SOS live API, fetching sales order, and syncing BOM lines...'):
+                    df = sos_grouped_sales_order_dataframe(client, so_number.strip(), explode=explode)
+                if df.empty:
+                    _sos_mark_live_fetch('Sales Order', 0, 0, f'Live SOS sales order lookup ran for {so_number.strip()}, but no lines were returned.')
+                    st.warning('No lines found for that sales order.')
+                else:
+                    shortage_count = int(pd.to_numeric(df['Short'], errors='coerce').fillna(0).gt(0).sum()) if 'Short' in df.columns else 0
+                    mode_note = 'BOM exploded from SOS assemblies.' if explode else 'Sales order lines fetched without subassembly explosion.'
+                    _sos_mark_live_fetch('Sales Order', len(df), shortage_count, f'Live SOS sales order fetch complete for {so_number.strip()}. {mode_note}')
+                    st.success(f'Live SOS sales order fetch complete. Rows returned: {len(df)}. Shortage rows: {shortage_count}.')
+                    st.caption(f'Data source: SOS live API • Fetched at: {st.session_state.get("sos_last_fetch_time")}')
+                    st.session_state['sos_last_df'] = df.copy()
+                    st.session_state['sos_last_label'] = f'SO_{so_number}_inventory_check'
+                    st.dataframe(df, use_container_width=True, hide_index=True, height=520)
+                    st.download_button('Download CSV', data=df.to_csv(index=False).encode('utf-8'), file_name=sos_safe_default_filename(f'SO_{so_number}_inventory_check'), mime='text/csv', key='sos_so_dl')
+            except Exception as exc:
+                st.error(str(exc))
+
+    with tab4:
+        render_sos_dashboard_viewer()
 
 def render_workspace_selector():
-    options = ['Derate Reports', 'Arduino Viewer', 'Plot Explorer', 'Label Studio', 'RF Calculator']
+    options = ['Derate Reports', 'Arduino Viewer', 'Plot Explorer', 'Label Studio', 'RF Calculator', 'SOS Inventory']
     selected = st.radio(
         'Workspace',
         options,
@@ -1274,6 +1883,35 @@ def render_plot_tab():
         png_bytes.seek(0)
         st.download_button('Download plot PNG', png_bytes.getvalue(), file_name='plot.png', mime='image/png')
         st.download_button('Download filtered CSV', export_df.to_csv(index=False).encode('utf-8'), file_name='filtered_plot_data.csv', mime='text/csv')
+
+
+
+
+def _metric_cards(items):
+    """Simple metric card helper used across workspaces."""
+    if not items:
+        return
+    cols = st.columns(len(items))
+    for col, item in zip(cols, items):
+        if isinstance(item, (list, tuple)):
+            label = item[0] if len(item) > 0 else ''
+            value = item[1] if len(item) > 1 else ''
+            help_text = item[2] if len(item) > 2 else None
+        else:
+            label, value, help_text = str(item), '', None
+        with col:
+            st.metric(label, value, help=help_text)
+
+
+def _workspace_intro(title, description=''):
+    st.markdown(f"### {title}")
+    if description:
+        st.caption(description)
+
+
+def render_app_header():
+    st.markdown("## WiBotic Engineering Toolkit")
+    st.caption("Derate, Arduino, Plot, Label, RF, and SOS inventory tools in one Streamlit app.")
 
 
 # -----------------------------
@@ -1880,5 +2518,7 @@ elif active_workspace == 'Plot Explorer':
     render_plot_tab()
 elif active_workspace == 'Label Studio':
     render_label_tab()
+elif active_workspace == 'SOS Inventory':
+    render_sos_workspace()
 else:
     render_rf_tab()

@@ -926,6 +926,49 @@ def _render_jabil_help(label_csv=None):
         _show_columns_found(label_csv, required, optional, 'jabil_help')
 
 
+def shipment_detail_to_csv_bytes(shipment_detail: Dict[str, Any]) -> bytes:
+    lines = []
+    for key in ("lines", "lineItems", "items", "shipmentLines"):
+        if isinstance(shipment_detail.get(key), list):
+            lines = shipment_detail.get(key) or []
+            break
+    rows = []
+    for ln in lines:
+        item_obj = ln.get("item") or {}
+        item = str(item_obj.get("name") or item_obj.get("fullname") or ln.get("itemName") or ln.get("name") or "").strip()
+        desc = str(ln.get("description") or "").strip()
+        shipped = ln.get("quantity") or ln.get("qty") or ln.get("quantityShipped") or ln.get("shippedQuantity") or 1
+        rows.append({"Item": item, "Description": desc, "Shipped": shipped})
+    if not rows:
+        return b"Item,Description,Shipped
+"
+    return pd.DataFrame(rows).to_csv(index=False).encode("utf-8")
+
+
+def _shipment_brief_label(sh: Dict[str, Any]) -> str:
+    num = str(sh.get("number") or "").strip()
+    date = str(sh.get("date") or "").strip()
+    status = str(sh.get("status") or "").strip()
+    cust = str(((sh.get("customer") or {}).get("name") or sh.get("customerName") or "")).strip()
+    return f"{num} | {date} | {status or '—'} | {cust or '—'}"
+
+
+def fetch_nabtesco_csv_from_sos(client: SOSReadonlyClient, sales_order_number: str) -> Tuple[Optional[bytes], List[Dict[str, Any]], str]:
+    shipments = client.get_shipments_for_sales_order(sales_order_number)
+    if not shipments:
+        return None, [], "No shipment found in SOS for that Sales Order."
+    exact = None
+    target = sales_order_number.strip().lower()
+    for sh in shipments:
+        num = str(sh.get("number") or "").strip().lower()
+        if num == target:
+            exact = sh
+            break
+    selected = exact or shipments[0]
+    detail = client.get_shipment_detail(int(selected["id"]))
+    return shipment_detail_to_csv_bytes(detail), shipments, ""
+
+
 def render_nabtesco_editor():
     st.markdown('### Nabtesco')
     editor_col, preview_col = st.columns([0.95, 1.35], gap='large')
@@ -934,9 +977,62 @@ def render_nabtesco_editor():
         st.markdown('#### Edit label')
         label_csv = st.file_uploader('Shipment CSV', type=['csv'], key='nabtesco_csv')
         sales_order = st.text_input('Sales Order', key='nabtesco_sales_order')
+        fetch_cols = st.columns([1.1, 0.9])
+        with fetch_cols[0]:
+            fetch_clicked = st.button('Fetch Shipment from SOS', use_container_width=True, key='nab_fetch_sos')
+        with fetch_cols[1]:
+            clear_clicked = st.button('Clear fetched shipment', use_container_width=True, key='nab_clear_fetch')
         customer_po = st.text_input('Customer Purchase Order', key='nabtesco_customer_po')
         preset = st.radio('Label size preset', ['4.00 × 2.32', '6.00 × 2.32', 'Custom'], horizontal=True, key='nab_size_preset', label_visibility='collapsed')
         preset_map = {'4.00 × 2.32': (4.0, 2.32), '6.00 × 2.32': (6.0, 2.32)}
+
+        if clear_clicked:
+            st.session_state.pop('nabtesco_fetched_csv', None)
+            st.session_state.pop('nabtesco_fetched_shipments', None)
+            st.session_state.pop('nabtesco_selected_shipment_idx', None)
+
+        if fetch_clicked:
+            if not sales_order.strip():
+                st.warning('Enter a Sales Order or Shipment number first.')
+            else:
+                refresh_token_value = ''
+                try:
+                    refresh_token_value = str(st.secrets.get('SOS_REFRESH_TOKEN', ''))
+                except Exception:
+                    refresh_token_value = ''
+                status_box = st.empty()
+                try:
+                    status_box.info('Searching shipment in SOS...')
+                    if not refresh_token_value:
+                        raise ValueError('SOS_REFRESH_TOKEN is missing in Streamlit secrets.')
+                    payload = refresh_sos_access_token(refresh_token_value)
+                    client = SOSReadonlyClient(payload['access_token'])
+                    status_box.info('Loading shipment detail...')
+                    csv_bytes, shipments, err = fetch_nabtesco_csv_from_sos(client, sales_order.strip())
+                    if err:
+                        status_box.error(err)
+                    else:
+                        st.session_state['nabtesco_fetched_csv'] = csv_bytes
+                        st.session_state['nabtesco_fetched_shipments'] = shipments
+                        st.session_state['nabtesco_selected_shipment_idx'] = 0
+                        status_box.success(f'Fetched {len(shipments)} shipment(s) from SOS.')
+                except Exception as e:
+                    status_box.error(f'Failed to fetch shipment from SOS: {e}')
+
+        shipments = st.session_state.get('nabtesco_fetched_shipments') or []
+        if shipments:
+            labels = [_shipment_brief_label(sh) for sh in shipments]
+            chosen_idx = st.selectbox('Fetched shipment', range(len(labels)), index=int(st.session_state.get('nabtesco_selected_shipment_idx', 0)), format_func=lambda i: labels[i], key='nab_shipment_choice')
+            if chosen_idx != st.session_state.get('nabtesco_selected_shipment_idx', 0):
+                st.session_state['nabtesco_selected_shipment_idx'] = chosen_idx
+                try:
+                    refresh_token_value = str(st.secrets.get('SOS_REFRESH_TOKEN', ''))
+                    payload = refresh_sos_access_token(refresh_token_value)
+                    client = SOSReadonlyClient(payload['access_token'])
+                    detail = client.get_shipment_detail(int(shipments[chosen_idx]['id']))
+                    st.session_state['nabtesco_fetched_csv'] = shipment_detail_to_csv_bytes(detail)
+                except Exception:
+                    pass
 
         def labeled_number(label, key, value, min_value=None, step=None, fmt=None):
             lcol, wcol = st.columns([0.92, 1.18], gap='small')
@@ -967,15 +1063,22 @@ def render_nabtesco_editor():
         logo_scale = labeled_number('Logo scale', 'nab_logo_scale', 1.0, min_value=0.2, step=0.1, fmt='%.1f')
         preview_count = int(labeled_number('Page preview count', 'nab_preview_count_num', 3, min_value=1, step=1))
 
-    if label_csv is None:
+    effective_csv = label_csv
+    fetched_csv = st.session_state.get('nabtesco_fetched_csv')
+    if fetched_csv:
+        effective_csv = io.BytesIO(fetched_csv)
+        effective_csv.name = 'fetched_shipment.csv'
+
+    if effective_csv is None:
         with preview_col:
-            st.info('Upload a CSV to open the label preview.')
+            st.info('Upload a CSV or use Fetch Shipment from SOS to open the label preview.')
         return
     try:
-        labels_df = parse_nabtesco_labels(label_csv)
+        labels_df = parse_nabtesco_labels(effective_csv)
         settings = _label_settings_dict(label_width, label_height, font_size, x_offset, y_offset, line_spacing, logo_scale)
         with editor_col:
-            st.success(f'{len(labels_df)} labels created from the CSV.')
+            source_caption = 'Fetched from SOS shipment.' if fetched_csv else 'Created from uploaded CSV.'
+            st.success(f'{len(labels_df)} labels ready. {source_caption}')
             with st.expander('Label data', expanded=False):
                 st.dataframe(labels_df, use_container_width=True, height=240)
             if sales_order.strip() and customer_po.strip():
@@ -994,7 +1097,6 @@ def render_nabtesco_editor():
     except Exception as e:
         with preview_col:
             st.error(f'Failed to build labels: {e}')
-
 
 def render_jabil_editor():
     st.markdown('### Jabil')
@@ -1283,12 +1385,7 @@ class SOSReadonlyClient:
         while attempts < allowable_attempts:
             attempts += 1
             try:
-                resp = requests.get(
-                    SOS_BASE_URL + endpoint,
-                    headers=self.headers,
-                    params=params,
-                    timeout=(10, 90),
-                )
+                resp = requests.get(SOS_BASE_URL + endpoint, headers=self.headers, params=params, timeout=(10, 90))
             except requests.exceptions.ReadTimeout:
                 if attempts >= allowable_attempts:
                     raise
@@ -1297,7 +1394,6 @@ class SOSReadonlyClient:
                 if attempts >= allowable_attempts:
                     raise
                 continue
-
             try:
                 last_json = resp.json()
             except Exception:
@@ -1336,6 +1432,26 @@ class SOSReadonlyClient:
     def get_sales_order_detail(self, so_id: int) -> Dict[str, Any]:
         resp = self._get(f"salesorder/{int(so_id)}")
         return resp.get("data", {}) or {}
+    def get_shipments(self, query: str, maxresults: int = 50) -> List[Dict[str, Any]]:
+        resp = self._get("shipment", params={"query": query, "maxresults": maxresults})
+        return resp.get("data", []) or []
+
+    def get_shipment_detail(self, shipment_id: int) -> Dict[str, Any]:
+        resp = self._get(f"shipment/{int(shipment_id)}")
+        return resp.get("data", {}) or {}
+
+    def get_shipments_for_sales_order(self, so_number: str) -> List[Dict[str, Any]]:
+        matches = self.get_shipments(so_number, maxresults=100)
+        so_l = so_number.strip().lower()
+        out: List[Dict[str, Any]] = []
+        for sh in matches:
+            num = str(sh.get("number") or "").strip().lower()
+            so_ref = str(((sh.get("salesOrder") or {}).get("number") or sh.get("salesOrderNumber") or "")).strip().lower()
+            raw = str(sh).lower()
+            if num == so_l or so_ref == so_l or so_l in raw:
+                out.append(sh)
+        return out or matches
+
 
     @staticmethod
     def extract_sales_order_lines(so_detail: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1369,21 +1485,9 @@ class SOSReadonlyClient:
         chunk_size = 25
         for i in range(0, len(ids), chunk_size):
             chunk = ids[i:i + chunk_size]
-            as_str = ",".join(str(x) for x in chunk)
+            as_str = ",".join(str(i) for i in chunk)
             items = self._get("item", params={"ids": as_str}).get("data", [])
-            all_items.extend([
-                SOSLineItem(
-                    item_id=item["id"],
-                    on_hand=item["onhand"],
-                    type=item["type"],
-                    quantity=1,
-                    fullname=item["fullname"],
-                    description=item.get("description", ""),
-                    has_serial=item.get("serialTracking", False),
-                    notes=item.get("notes", ""),
-                )
-                for item in items
-            ])
+            all_items.extend([SOSLineItem(item_id=item["id"], on_hand=item["onhand"], type=item["type"], quantity=1, fullname=item["fullname"], description=item.get("description", ""), has_serial=item.get("serialTracking", False), notes=item.get("notes", "")) for item in items])
         return all_items
 
     def get_items_by_name(self, name: str) -> List[SOSLineItem]:
@@ -1397,8 +1501,6 @@ class SOSReadonlyClient:
             if str(e) == "404":
                 return []
             raise
-        except requests.exceptions.ReadTimeout:
-            return []
         lines = (resp.get("data") or {}).get("lines", []) or []
         if not lines:
             return []
@@ -1418,26 +1520,16 @@ class SOSReadonlyClient:
 
         while assemblies:
             assembly = assemblies.pop()
-            try:
-                bom_data = self.get_single_level_bom(int(assembly["item_id"]), int(assembly["quantity"]))
-            except requests.exceptions.ReadTimeout:
-                continue
-            except Exception:
-                continue
-
+            bom_data = self.get_single_level_bom(int(assembly["item_id"]), int(assembly["quantity"]))
             if not bom_data:
-                try:
-                    item_self = self.get_items_by_id([int(assembly["item_id"])])[0]
-                    item_self.quantity = float(assembly["quantity"])
-                    existing = next((x for x in line_items if x.fullname == item_self.fullname), None)
-                    if existing:
-                        existing.quantity += item_self.quantity
-                    else:
-                        line_items.append(item_self)
-                except Exception:
-                    pass
+                item_self = self.get_items_by_id([int(assembly["item_id"])])[0]
+                item_self.quantity = float(assembly["quantity"])
+                existing = next((x for x in line_items if x.fullname == item_self.fullname), None)
+                if existing:
+                    existing.quantity += item_self.quantity
+                else:
+                    line_items.append(item_self)
                 continue
-
             for bom_item in bom_data:
                 if has_subassembly(bom_item) and always_explode:
                     assemblies.append({"item_id": bom_item.item_id, "quantity": bom_item.quantity})

@@ -1516,34 +1516,29 @@ def render_sos_dashboard_viewer():
 
 
 def render_sos_help_tab():
-    st.subheader('Help / How to use SOS')
+    st.subheader('How to use SOS Inventory')
+    st.caption('Read-only live inventory and BOM checker for quick item, batch, and sales-order reviews.')
+
+    quick1, quick2, quick3 = st.columns(3)
+    quick1.info('**Single**\n\nCheck one part or assembly and explode its BOM.')
+    quick2.info('**Batch CSV**\n\nUpload multiple parts with quantities and review shortages together.')
+    quick3.info('**Sales Order**\n\nPull a live SOS sales order and evaluate required inventory.')
+
     st.markdown("""
-Use this workspace to check **live SOS inventory and BOM availability** without changing anything in SOS.
+**Best workflow**
+1. Start with **Single** for a quick one-off check.
+2. Use **Batch CSV** for a parts list or shortage review.
+3. Use **Sales Order** when you want the app to pull lines directly from SOS.
+4. Review and export the result from **Dashboard**.
 
-**Single**
-- Enter one exact item or part name.
-- Choose a quantity.
-- Click **Run single check**.
-- The app looks up the item in SOS and explodes the BOM.
-
-**Batch CSV**
-- Upload a CSV with an item column and a quantity column.
-- Supported item headers: `Item Name`, `ItemName`, `Part Name`, `Name`, `Item Number`, `Part Number`, `PN`
-- Supported quantity headers: `Quantity`, `quantity`, `qty`, `QTY`
-- Click **Run batch check**.
-
-**Sales Order**
-- Enter the SOS sales order number.
-- Leave **Explode subassemblies** checked to sync full BOM demand.
-- Click **Run sales order check**.
-
-**Dashboard**
-- Review the last result on-page.
-- Filter shortages, search part numbers, and export the filtered CSV.
+**Supported CSV columns**
+- Item column: `Item Name`, `ItemName`, `Part Name`, `Name`, `Item Number`, `Part Number`, `PN`
+- Quantity column: `Quantity`, `quantity`, `qty`, `QTY`
 
 **Safety**
-- This workspace is read-only.
-- It checks live SOS data but does not create builds and does not write back to SOS.
+- This workspace is **read-only**
+- It checks **live SOS data**
+- It does **not** create builds or write anything back to SOS
 """)
 
     template_df = pd.DataFrame([
@@ -1555,6 +1550,7 @@ Use this workspace to check **live SOS inventory and BOM availability** without 
 
     st.markdown('**CSV template example**')
     st.dataframe(template_df, use_container_width=True, hide_index=True)
+
     c1, c2 = st.columns([1, 2])
     with c1:
         st.download_button(
@@ -1566,11 +1562,12 @@ Use this workspace to check **live SOS inventory and BOM availability** without 
             use_container_width=True,
         )
     with c2:
-        st.caption('You can use `Part Number` or any of the supported item-name headers. Quantities should be whole numbers.')
+        st.caption('Use `Part Number` or any supported item header. Quantities should be whole numbers.')
+
 
 def render_sos_workspace():
     st.subheader('SOS Inventory')
-    st.caption('Read-only SOS inventory, BOM, and sales-order checks. No POST, no PUT, no build creation.')
+    st.caption('Read-only live inventory, BOM, and sales-order checks for production planning.')
 
     def _sos_mark_live_fetch(source: str, rows_count: int, shortage_count: int, note: str = ''):
         st.session_state['sos_last_fetch_time'] = pd.Timestamp.now().strftime('%Y-%m-%d %I:%M:%S %p')
@@ -1580,17 +1577,34 @@ def render_sos_workspace():
         st.session_state['sos_last_note'] = note
 
     auth_url = sos_build_auth_url()
-    with st.expander('SOS connection', expanded=True):
-        c1, c2 = st.columns([1, 2])
-        client: Optional[SOSReadonlyClient] = None
-        status_text = 'Not connected'
-        try:
-            client, status_text = sos_get_authenticated_client()
-        except Exception as exc:
-            st.error(f'SOS authentication failed: {exc}')
-        with c1:
-            st.metric('Connection', 'Ready' if client else 'Not ready')
-        with c2:
+    client: Optional[SOSReadonlyClient] = None
+    status_text = 'Not connected'
+    try:
+        client, status_text = sos_get_authenticated_client()
+    except Exception as exc:
+        st.error(f'SOS authentication failed: {exc}')
+
+    st.markdown("""
+    <div style="padding:0.9rem 1rem; border:1px solid rgba(120,160,220,0.25); border-radius:18px; background:rgba(120,160,220,0.08); margin:0.2rem 0 1rem 0;">
+      <div style="font-size:1.15rem; font-weight:700; margin-bottom:0.2rem;">🔗 Live SOS Inventory Checker</div>
+      <div style="opacity:0.9;">Use this workspace to check items, batch CSVs, and sales orders against live SOS data without changing anything in SOS.</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    top1, top2, top3, top4 = st.columns(4)
+    top1.metric('Connection', 'Ready' if client else 'Not ready')
+    top2.metric('Mode', 'Read-only')
+    top3.metric('Source', st.session_state.get('sos_last_source', 'Live SOS API' if client else 'Not connected'))
+    top4.metric('Last sync', st.session_state.get('sos_last_fetch_time', 'Not run yet'))
+
+    mid1, mid2 = st.columns([1, 1])
+    mid1.metric('Rows returned', st.session_state.get('sos_last_rows', 0))
+    mid2.metric('Shortages', st.session_state.get('sos_last_shortages', 0))
+    st.caption(st.session_state.get('sos_last_note', 'Run a check to confirm live SOS fetch and BOM explosion activity.'))
+
+    with st.expander('Connection and advanced options', expanded=False):
+        a1, a2 = st.columns([2, 2])
+        with a1:
             st.write(status_text)
             if auth_url:
                 st.markdown(f'[Connect to SOS]({auth_url})')
@@ -1601,36 +1615,22 @@ def render_sos_workspace():
                 masked = latest[:8] + '...' + latest[-8:] if isinstance(latest, str) and len(latest) > 20 else 'Hidden'
                 st.info('A new refresh token was returned. Replace the old SOS_REFRESH_TOKEN in your secrets after testing.')
                 st.caption(f'New token received: {masked}')
-        cc1, cc2 = st.columns([1, 3])
-        if cc1.button('Forget SOS session token', key='forget_sos_session_btn'):
-            for key in ['sos_access_token', 'sos_refresh_token_latest']:
-                st.session_state.pop(key, None)
-            st.rerun()
-        with cc2.expander('Hosted secrets template'):
-            st.code("""SOS_REFRESH_TOKEN="..."
-SOS_CLIENT_ID="..."
-SOS_CLIENT_SECRET="..."
-SOS_REDIRECT_URI="https://your-app.streamlit.app/""" , language='toml')
+        with a2:
+            if st.button('Forget SOS session token', key='forget_sos_session_btn'):
+                for key in ['sos_access_token', 'sos_refresh_token_latest']:
+                    st.session_state.pop(key, None)
+                st.rerun()
+            with st.expander('Hosted secrets template'):
+                st.code('''SOS_REFRESH_TOKEN="..."\nSOS_CLIENT_ID="..."\nSOS_CLIENT_SECRET="..."\nSOS_REDIRECT_URI="https://your-app.streamlit.app/"''', language='toml')
 
     if client is None:
         st.warning('Add SOS secrets first. The workspace is ready, but it cannot talk to SOS until a refresh token or OAuth secrets are available.')
         return
 
-    st.markdown('#### Live SOS status')
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric('Source', st.session_state.get('sos_last_source', 'Connected to live SOS'))
-    m2.metric('Last sync', st.session_state.get('sos_last_fetch_time', 'Not run yet'))
-    m3.metric('Rows returned', st.session_state.get('sos_last_rows', 0))
-    m4.metric('Shortages', st.session_state.get('sos_last_shortages', 0))
-    st.caption(st.session_state.get('sos_last_note', 'Run a check to confirm live SOS fetch and BOM explosion activity.'))
-
     headers = ['Part Number', 'Enough', 'Needed', 'On Hand', 'Short', 'Type', 'Name/Description', 'Location', 'Notes']
-    tab0, tab1, tab2, tab3, tab4 = st.tabs(['Help', 'Single', 'Batch CSV', 'Sales Order', 'Dashboard'])
+    tab0, tab1, tab2, tab3, tab4 = st.tabs(['Single', 'Batch CSV', 'Sales Order', 'Dashboard', 'Help'])
 
     with tab0:
-        render_sos_help_tab()
-
-    with tab1:
         st.subheader('Single item check')
         single_name = st.text_input('Item name', key='sos_single_name')
         single_qty = st.number_input('Quantity', min_value=1, value=1, step=1, key='sos_single_qty')
@@ -1654,9 +1654,25 @@ SOS_REDIRECT_URI="https://your-app.streamlit.app/""" , language='toml')
             except Exception as exc:
                 st.error(str(exc))
 
-    with tab2:
+    with tab1:
         st.subheader('Batch CSV check')
-        uploaded = st.file_uploader('Upload CSV', type=['csv'], key='sos_batch_csv')
+        b1, b2 = st.columns([2, 1])
+        with b1:
+            uploaded = st.file_uploader('Upload CSV', type=['csv'], key='sos_batch_csv')
+        with b2:
+            template_df = pd.DataFrame([
+                {'Part Number': '130-000101 Rev C', 'Quantity': 2},
+                {'Part Number': '330-000038', 'Quantity': 12},
+                {'Part Number': '720-000141', 'Quantity': 4},
+            ])
+            st.download_button(
+                'Download template',
+                data=template_df.to_csv(index=False).encode('utf-8'),
+                file_name='sos_batch_template.csv',
+                mime='text/csv',
+                key='sos_batch_template_inline',
+                use_container_width=True,
+            )
         if st.button('Run batch check', key='sos_run_batch'):
             if uploaded is None:
                 st.warning('Upload a CSV first.')
@@ -1685,7 +1701,7 @@ SOS_REDIRECT_URI="https://your-app.streamlit.app/""" , language='toml')
                 except Exception as exc:
                     st.error(str(exc))
 
-    with tab3:
+    with tab2:
         st.subheader('Sales Order check')
         so_number = st.text_input('Sales order number', key='sos_so_number')
         explode = st.checkbox('Explode subassemblies', value=True, key='sos_so_explode')

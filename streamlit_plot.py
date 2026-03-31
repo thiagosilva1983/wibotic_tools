@@ -1209,6 +1209,46 @@ def sos_trim_text(s: str, n: int = 45) -> str:
     return s if len(s) <= n else s[: n - 3] + "..."
 
 
+def sos_buildability_summary(parent_item: SOSLineItem, rows: List[List[str]]) -> Dict[str, Any]:
+    assembly_on_hand = int(getattr(parent_item, "on_hand", 0) or 0)
+    if not rows:
+        return {
+            "assembly_on_hand": assembly_on_hand,
+            "buildable_from_parts": 0,
+            "potential_total": assembly_on_hand,
+            "limiting_parts": "",
+        }
+
+    buildable_values = []
+    for row in rows:
+        try:
+            part_number = str(row[0])
+            needed = max(int(float(row[2])), 0)
+            on_hand = max(int(float(row[3])), 0)
+        except Exception:
+            continue
+        if needed <= 0:
+            continue
+        buildable_values.append((part_number, on_hand // needed))
+
+    if not buildable_values:
+        return {
+            "assembly_on_hand": assembly_on_hand,
+            "buildable_from_parts": 0,
+            "potential_total": assembly_on_hand,
+            "limiting_parts": "",
+        }
+
+    min_buildable = min(v for _, v in buildable_values)
+    limiting_parts = [pn for pn, v in buildable_values if v == min_buildable]
+    return {
+        "assembly_on_hand": assembly_on_hand,
+        "buildable_from_parts": int(min_buildable),
+        "potential_total": int(assembly_on_hand + min_buildable),
+        "limiting_parts": ", ".join(limiting_parts),
+    }
+
+
 def sos_normalize_item_text(value: str) -> str:
     return re.sub(r"\s+", " ", (value or "").strip()).lower()
 
@@ -1579,7 +1619,8 @@ def sos_bom_rows_from_selected_item(client: SOSReadonlyClient, item: SOSLineItem
         onhand = int(bi.on_hand)
         short = max(needed - onhand, 0)
         enough = "✅" if short == 0 else "❌"
-        rows.append([bi.fullname, enough, str(needed), str(onhand), str(short), bi.type, bi.description, sos_extract_location(bi.notes or ""), sos_trim_text(bi.notes or "", 45)])
+        buildable_qty = onhand // needed if needed > 0 else 0
+        rows.append([bi.fullname, enough, str(needed), str(onhand), str(buildable_qty), str(short), bi.type, bi.description, sos_extract_location(bi.notes or ""), sos_trim_text(bi.notes or "", 45)])
     return rows
 
 
@@ -1611,7 +1652,7 @@ def sos_grouped_sales_order_dataframe(client: SOSReadonlyClient, so_number: str,
         raise ValueError(f"Sales order missing id: {so_obj}")
     so_detail = client.get_sales_order_detail(int(so_id))
     reqs = client.sales_order_to_requests(so_detail)
-    headers = ["Part Number", "Enough", "Needed", "On Hand", "Short", "Type", "Name/Description", "Location", "Notes"]
+    headers = ["Part Number", "Enough", "Needed", "On Hand", "Buildable Qty", "Short", "Type", "Name/Description", "Location", "Notes"]
     frames: List[pd.DataFrame] = []
     for name, qty in reqs:
         rows = sos_bom_rows_from_item(client, name, qty, explode=explode)
@@ -1689,9 +1730,9 @@ def render_sos_dashboard_viewer():
     with s1:
         if 'Part Number' in work.columns and 'Short' in work.columns:
             by_part = (
-                work.assign(Short_num=pd.to_numeric(work['Short'], errors='coerce').fillna(0), Needed_num=pd.to_numeric(work.get('Needed', 0), errors='coerce').fillna(0))
+                work.assign(Short_num=pd.to_numeric(work['Short'], errors='coerce').fillna(0), Needed_num=pd.to_numeric(work.get('Needed', 0), errors='coerce').fillna(0), Buildable_num=pd.to_numeric(work.get('Buildable Qty', 0), errors='coerce').fillna(0))
                 .groupby('Part Number', as_index=False)
-                .agg(Short_Total=('Short_num', 'sum'), Needed_Total=('Needed_num', 'sum'), Lines=('Part Number', 'count'))
+                .agg(Short_Total=('Short_num', 'sum'), Needed_Total=('Needed_num', 'sum'), Min_Buildable=('Buildable_num', 'min'), Lines=('Part Number', 'count'))
                 .sort_values(['Short_Total', 'Needed_Total'], ascending=False)
             )
             st.markdown('**Summary by part**')
@@ -1821,7 +1862,7 @@ SOS_REDIRECT_URI="https://your-app.streamlit.app/""" , language='toml')
     m4.metric('Shortages', st.session_state.get('sos_last_shortages', 0))
     st.caption(st.session_state.get('sos_last_note', 'Run a check to confirm live SOS fetch and BOM explosion activity.'))
 
-    headers = ['Part Number', 'Enough', 'Needed', 'On Hand', 'Short', 'Type', 'Name/Description', 'Location', 'Notes']
+    headers = ['Part Number', 'Enough', 'Needed', 'On Hand', 'Buildable Qty', 'Short', 'Type', 'Name/Description', 'Location', 'Notes']
     tab1, tab2, tab3, tab4, tab5 = st.tabs(['Single', 'Batch CSV', 'Sales Order', 'Dashboard', 'Help'])
 
     with tab1:
@@ -1898,6 +1939,7 @@ SOS_REDIRECT_URI="https://your-app.streamlit.app/""" , language='toml')
 
                     with st.spinner('Talking to SOS live API, syncing the selected item, and exploding BOM...'):
                         rows = sos_bom_rows_from_selected_item(client, selected_item, int(single_qty), explode=True)
+                        build_summary = sos_buildability_summary(selected_item, rows)
                     if not rows:
                         _sos_mark_live_fetch('Single item', 0, 0, 'Live SOS lookup ran, but the selected item returned no BOM rows.')
                         st.warning('No BOM rows returned for the selected item.')
@@ -1909,6 +1951,12 @@ SOS_REDIRECT_URI="https://your-app.streamlit.app/""" , language='toml')
                         st.caption(f'Data source: SOS live API • Fetched at: {st.session_state.get("sos_last_fetch_time")}')
                         st.session_state['sos_last_df'] = df.copy()
                         st.session_state['sos_last_label'] = f'Single_{selected_item.fullname}_x{single_qty}'
+                        csum1, csum2, csum3 = st.columns(3)
+                        csum1.metric('Assembly on hand', build_summary['assembly_on_hand'])
+                        csum2.metric('Buildable from parts', build_summary['buildable_from_parts'])
+                        csum3.metric('Potential total', build_summary['potential_total'])
+                        if build_summary['limiting_parts']:
+                            st.caption(f"Limiting part(s): {build_summary['limiting_parts']}")
                         st.dataframe(df, use_container_width=True, hide_index=True, height=460)
                         st.download_button('Download CSV', data=df.to_csv(index=False).encode('utf-8'), file_name=sos_safe_default_filename(f'Single_{selected_item.fullname}_x{single_qty}'), mime='text/csv', key='sos_single_dl')
             except Exception as exc:
@@ -1964,6 +2012,22 @@ SOS_REDIRECT_URI="https://your-app.streamlit.app/""" , language='toml')
                     st.caption(f'Data source: SOS live API • Fetched at: {st.session_state.get("sos_last_fetch_time")}')
                     st.session_state['sos_last_df'] = df.copy()
                     st.session_state['sos_last_label'] = f'SO_{so_number}_inventory_check'
+                    if 'Assembly / SO Line' in df.columns and 'Buildable Qty' in df.columns:
+                        summary_rows = []
+                        for source_name, grp in df.groupby('Assembly / SO Line'):
+                            buildable = int(pd.to_numeric(grp['Buildable Qty'], errors='coerce').fillna(0).min()) if not grp.empty else 0
+                            limiting_parts = ', '.join(grp.loc[pd.to_numeric(grp['Buildable Qty'], errors='coerce').fillna(0) == buildable, 'Part Number'].astype(str).tolist())
+                            requested_qty = int(pd.to_numeric(grp['Needed'], errors='coerce').fillna(0).max()) if not grp.empty else 0
+                            summary_rows.append({
+                                'Assembly / SO Line': source_name,
+                                'Requested Qty': requested_qty,
+                                'Buildable From Parts': buildable,
+                                'Enough For Requested Qty': '✅' if buildable >= requested_qty else '❌',
+                                'Limiting Part(s)': limiting_parts,
+                            })
+                        if summary_rows:
+                            st.markdown('**Buildability summary**')
+                            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True, height=220)
                     st.dataframe(df, use_container_width=True, hide_index=True, height=520)
                     st.download_button('Download CSV', data=df.to_csv(index=False).encode('utf-8'), file_name=sos_safe_default_filename(f'SO_{so_number}_inventory_check'), mime='text/csv', key='sos_so_dl')
             except Exception as exc:

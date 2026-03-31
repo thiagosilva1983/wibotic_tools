@@ -1185,6 +1185,7 @@ class SOSLineItem:
     has_serial: bool
     serial: Optional[str] = None
     notes: str = ""
+    purchase_cost: float = 0.0
 
 
 class SOSAuthError(Exception):

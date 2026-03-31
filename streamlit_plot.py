@@ -1211,9 +1211,13 @@ def sos_trim_text(s: str, n: int = 45) -> str:
 
 def sos_buildability_summary(parent_item: SOSLineItem, rows: List[List[str]]) -> Dict[str, Any]:
     assembly_on_hand = int(getattr(parent_item, "on_hand", 0) or 0)
+    assembly_location = sos_extract_location(getattr(parent_item, "notes", "") or "")
+    assembly_notes = (getattr(parent_item, "notes", "") or "").strip()
+    assembly_location_display = assembly_location or (assembly_notes if assembly_notes else "Not found in notes")
     if not rows:
         return {
             "assembly_on_hand": assembly_on_hand,
+            "assembly_location": assembly_location_display,
             "buildable_from_parts": 0,
             "potential_total": assembly_on_hand,
             "limiting_parts": "",
@@ -1234,6 +1238,7 @@ def sos_buildability_summary(parent_item: SOSLineItem, rows: List[List[str]]) ->
     if not buildable_values:
         return {
             "assembly_on_hand": assembly_on_hand,
+            "assembly_location": assembly_location_display,
             "buildable_from_parts": 0,
             "potential_total": assembly_on_hand,
             "limiting_parts": "",
@@ -1243,6 +1248,7 @@ def sos_buildability_summary(parent_item: SOSLineItem, rows: List[List[str]]) ->
     limiting_parts = [pn for pn, v in buildable_values if v == min_buildable]
     return {
         "assembly_on_hand": assembly_on_hand,
+        "assembly_location": assembly_location_display,
         "buildable_from_parts": int(min_buildable),
         "potential_total": int(assembly_on_hand + min_buildable),
         "limiting_parts": ", ".join(limiting_parts),
@@ -1951,10 +1957,11 @@ SOS_REDIRECT_URI="https://your-app.streamlit.app/""" , language='toml')
                         st.caption(f'Data source: SOS live API • Fetched at: {st.session_state.get("sos_last_fetch_time")}')
                         st.session_state['sos_last_df'] = df.copy()
                         st.session_state['sos_last_label'] = f'Single_{selected_item.fullname}_x{single_qty}'
-                        csum1, csum2, csum3 = st.columns(3)
+                        csum1, csum2, csum3, csum4 = st.columns(4)
                         csum1.metric('Assembly on hand', build_summary['assembly_on_hand'])
-                        csum2.metric('Buildable from parts', build_summary['buildable_from_parts'])
-                        csum3.metric('Potential total', build_summary['potential_total'])
+                        csum2.metric('Assembly location', build_summary['assembly_location'])
+                        csum3.metric('Buildable from parts', build_summary['buildable_from_parts'])
+                        csum4.metric('Potential total', build_summary['potential_total'])
                         if build_summary['limiting_parts']:
                             st.caption(f"Limiting part(s): {build_summary['limiting_parts']}")
                         st.dataframe(df, use_container_width=True, hide_index=True, height=460)

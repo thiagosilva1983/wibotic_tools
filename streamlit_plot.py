@@ -1639,7 +1639,8 @@ def sos_bom_rows_from_selected_item(client: SOSReadonlyClient, item: SOSLineItem
         short = max(needed - onhand, 0)
         enough = "✅" if short == 0 else "❌"
         buildable_qty = onhand // needed if needed > 0 else 0
-        rows.append([bi.fullname, enough, str(needed), str(onhand), str(buildable_qty), str(short), bi.type, bi.description, sos_extract_location(bi.notes or ""), sos_trim_text(bi.notes or "", 45)])
+        purchase_cost = sos_to_float(getattr(bi, "purchase_cost", 0), 0.0)
+        rows.append([bi.fullname, enough, str(needed), str(onhand), str(buildable_qty), str(short), f"{purchase_cost:.2f}", bi.type, bi.description, sos_extract_location(bi.notes or ""), sos_trim_text(bi.notes or "", 45)])
     return rows
 
 
@@ -1671,7 +1672,7 @@ def sos_grouped_sales_order_dataframe(client: SOSReadonlyClient, so_number: str,
         raise ValueError(f"Sales order missing id: {so_obj}")
     so_detail = client.get_sales_order_detail(int(so_id))
     reqs = client.sales_order_to_requests(so_detail)
-    headers = ["Part Number", "Enough", "Needed", "On Hand", "Buildable Qty", "Short", "Type", "Name/Description", "Location", "Notes"]
+    headers = ["Part Number", "Enough", "Needed", "On Hand", "Buildable Qty", "Short", "Purchase Cost", "Type", "Name/Description", "Location", "Notes"]
     frames: List[pd.DataFrame] = []
     for name, qty in reqs:
         rows = sos_bom_rows_from_item(client, name, qty, explode=explode)
@@ -1881,7 +1882,7 @@ SOS_REDIRECT_URI="https://your-app.streamlit.app/""" , language='toml')
     m4.metric('Shortages', st.session_state.get('sos_last_shortages', 0))
     st.caption(st.session_state.get('sos_last_note', 'Run a check to confirm live SOS fetch and BOM explosion activity.'))
 
-    headers = ['Part Number', 'Enough', 'Needed', 'On Hand', 'Buildable Qty', 'Short', 'Type', 'Name/Description', 'Location', 'Notes']
+    headers = ['Part Number', 'Enough', 'Needed', 'On Hand', 'Buildable Qty', 'Short', 'Purchase Cost', 'Type', 'Name/Description', 'Location', 'Notes']
     tab1, tab2, tab3, tab4, tab5 = st.tabs(['Single', 'Batch CSV', 'Sales Order', 'Dashboard', 'Help'])
 
     with tab1:

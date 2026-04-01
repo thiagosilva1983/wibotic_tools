@@ -1,4 +1,4 @@
-# Rev I - shipment selector for split Sales Orders
+# Rev J - shipment serials + customer PO for Nabtesco shipments
 import io
 import base64
 import re
@@ -817,25 +817,202 @@ def build_jabil_pdf(labels_df, sales_order, customer_po, settings, date_code='')
 # ---------- Label help / templates ----------
 
 
+
+
+def _flatten_text_values(obj: Any, max_depth: int = 6) -> List[str]:
+    values: List[str] = []
+
+    def walk(x: Any, depth: int) -> None:
+        if depth > max_depth or x is None:
+            return
+        if isinstance(x, dict):
+            for v in x.values():
+                walk(v, depth + 1)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v, depth + 1)
+        else:
+            s = str(x).strip()
+            if s:
+                values.append(s)
+
+    walk(obj, 0)
+    return values
+
+
+def _extract_serials_from_text(text_value: str) -> List[str]:
+    text_value = str(text_value or '')
+    serials: List[str] = []
+
+    direct_patterns = [
+        r'(?:\bS\/?N\b|\bSN\b|\bSerial(?:\s*Number)?\b)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._\-/]+)',
+        r'\bMN\s*[:#-]?\s*[^|\r\n]+?\bSN\s*[:#-]?\s*([A-Z0-9][A-Z0-9._\-/]+)',
+    ]
+    for pat in direct_patterns:
+        for m in re.findall(pat, text_value, flags=re.IGNORECASE):
+            s = str(m).strip().strip(',;|')
+            if len(s) >= 5 and re.search(r'\d', s):
+                serials.append(s)
+
+    # Fallback for bare serial-like tokens such as WX6994FDFC
+    for token in re.findall(r'\b[A-Z]{1,4}[A-Z0-9]{5,}\b', text_value, flags=re.IGNORECASE):
+        token = token.strip()
+        upper = token.upper()
+        if upper in {'TR', 'MAC', 'ITEM', 'SHIPPED', 'SERIAL', 'NUMBER'}:
+            continue
+        if len(token) >= 8 and re.search(r'\d', token):
+            serials.append(token)
+
+    seen = set()
+    out: List[str] = []
+    for s in serials:
+        key = s.upper()
+        if key not in seen:
+            seen.add(key)
+            out.append(s)
+    return out
+
+
+def _extract_serials_from_shipment_line(line: Dict[str, Any]) -> List[str]:
+    candidate_keys = {
+        'serial', 'serialnumber', 'serialnumbers', 'serialno', 'serialnos', 'sn', 's/n',
+        'serialtrackingnumbers', 'serialtrackingnumber', 'numbers', 'inventorynumbers'
+    }
+    serials: List[str] = []
+
+    def walk(obj: Any, depth: int = 0, preferred: bool = False) -> None:
+        if depth > 6 or obj is None:
+            return
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                k_norm = str(k).strip().lower().replace('_', '').replace(' ', '')
+                next_preferred = preferred or ('serial' in k_norm) or (k_norm in candidate_keys)
+                if next_preferred and isinstance(v, (str, int, float)):
+                    serials.extend(_extract_serials_from_text(str(v)))
+                walk(v, depth + 1, next_preferred)
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v, depth + 1, preferred)
+        elif preferred:
+            serials.extend(_extract_serials_from_text(str(obj)))
+
+    walk(line)
+
+    if not serials:
+        for text_value in _flatten_text_values(line):
+            if 'sn' in text_value.lower() or 'serial' in text_value.lower() or re.search(r'\bWX[A-Z0-9]+\b', text_value, flags=re.IGNORECASE):
+                serials.extend(_extract_serials_from_text(text_value))
+
+    seen = set()
+    out: List[str] = []
+    for s in serials:
+        key = s.upper()
+        if key not in seen:
+            seen.add(key)
+            out.append(s)
+    return out
+
+
+def _extract_customer_po(detail: Dict[str, Any]) -> str:
+    preferred_paths = [
+        ('customerPurchaseOrder',),
+        ('customerPONumber',),
+        ('customerPoNumber',),
+        ('customerPO',),
+        ('customerPo',),
+        ('poNumber',),
+        ('purchaseOrderNumber',),
+        ('purchaseOrder',),
+        ('po',),
+        ('customerRefNumber',),
+        ('referenceNumber',),
+        ('salesOrder', 'customerPurchaseOrder'),
+        ('salesOrder', 'customerPONumber'),
+        ('salesOrder', 'customerPoNumber'),
+        ('salesOrder', 'customerPO'),
+        ('salesOrder', 'customerPo'),
+        ('salesOrder', 'purchaseOrderNumber'),
+        ('salesOrder', 'poNumber'),
+        ('salesOrder', 'customerRefNumber'),
+    ]
+    for path in preferred_paths:
+        cur: Any = detail
+        ok = True
+        for key in path:
+            if isinstance(cur, dict) and key in cur:
+                cur = cur.get(key)
+            else:
+                ok = False
+                break
+        if ok:
+            value = str(cur or '').strip()
+            if value:
+                return value
+
+    best = ''
+    for k, v in (detail or {}).items():
+        if isinstance(v, dict):
+            nested = _extract_customer_po(v)
+            if nested:
+                return nested
+        k_norm = str(k).lower().replace('_', '').replace(' ', '')
+        if any(tag in k_norm for tag in ['customerpo', 'customerpurchaseorder', 'ponumber', 'purchaseorder']):
+            value = str(v or '').strip()
+            if value:
+                return value
+        if not best and k_norm == 'referencenumber':
+            value = str(v or '').strip()
+            if value:
+                best = value
+    return best
+
+
 def build_nabtesco_csv_from_shipment_detail(sh_detail: Dict[str, Any]) -> bytes:
     lines = SOSReadonlyClient.extract_shipment_lines(sh_detail)
     out_rows: List[Dict[str, Any]] = []
+    customer_po = _extract_customer_po(sh_detail)
     for ln in lines:
         item_obj = ln.get("item") or {}
         part_number = str(item_obj.get("name") or item_obj.get("fullname") or ln.get("itemName") or ln.get("name") or "").strip()
-        description = str(ln.get("description") or "").strip()
+        description = str(
+            ln.get("description")
+            or item_obj.get("description")
+            or ln.get("itemDescription")
+            or ln.get("memo")
+            or ''
+        ).strip()
         shipped = ln.get("quantity") or ln.get("qty") or ln.get("quantityShipped") or ln.get("shippedQuantity") or 1
         try:
             shipped_val = int(float(shipped))
         except Exception:
             shipped_val = 1
-        out_rows.append({
-            "Item": part_number,
-            "Description": description,
-            "Shipped": shipped_val,
-        })
+
+        serials = _extract_serials_from_shipment_line(ln)
+        if serials:
+            sn_text = ", ".join(serials)
+            description_with_sn = description
+            if description_with_sn:
+                if 'SN:' not in description_with_sn.upper() and 'S/N:' not in description_with_sn.upper():
+                    description_with_sn = f"{description_with_sn} | SN:{sn_text}"
+            else:
+                description_with_sn = f"SN:{sn_text}"
+            out_rows.append({
+                "Item": part_number,
+                "Description": description_with_sn,
+                "Serial Number": sn_text,
+                "Shipped": shipped_val,
+                "Customer Purchase Order": customer_po,
+            })
+        else:
+            out_rows.append({
+                "Item": part_number,
+                "Description": description,
+                "Serial Number": "",
+                "Shipped": shipped_val,
+                "Customer Purchase Order": customer_po,
+            })
     if not out_rows:
-        return b"Item,Description,Shipped\n"
+        return b"Item,Description,Serial Number,Shipped,Customer Purchase Order\n"
     return pd.DataFrame(out_rows).to_csv(index=False).encode("utf-8")
 
 try:
@@ -1008,6 +1185,9 @@ def _load_selected_nabtesco_shipment(selection_label: str) -> None:
     st.session_state['nab_fetched_csv_bytes'] = build_nabtesco_csv_from_shipment_detail(selected_detail)
     st.session_state['nab_selected_shipment_number'] = str(selected_detail.get('number') or '')
     st.session_state['nab_selected_shipment_summary'] = _shipment_detail_summary(selected_detail)
+    extracted_po = _extract_customer_po(selected_detail)
+    if extracted_po:
+        st.session_state['nabtesco_customer_po'] = extracted_po
 
 
 def render_nabtesco_editor():
@@ -1077,14 +1257,25 @@ def render_nabtesco_editor():
                     progress = st.progress(0, text='Searching shipment(s) in SOS...')
                     try:
                         shipments = client.get_shipments_for_sales_order(sales_order.strip(), maxresults=50)
+                        so_detail = None
+                        so_match = client.get_sales_order_by_number(sales_order.strip())
+                        if so_match and so_match.get('id'):
+                            try:
+                                so_detail = client.get_sales_order_detail(int(so_match.get('id')))
+                            except Exception:
+                                so_detail = so_match
                         progress.progress(35, text='Loading shipment detail(s)...')
                         options = []
                         details_map = {}
+                        fetched_customer_po = _extract_customer_po(so_detail or {}) if so_detail else ''
                         for idx, sh in enumerate(shipments):
                             sh_id = sh.get('id')
                             if not sh_id:
                                 continue
                             detail = client.get_shipment_detail(int(sh_id))
+                            if fetched_customer_po and not _extract_customer_po(detail):
+                                detail = dict(detail)
+                                detail['customerPurchaseOrder'] = fetched_customer_po
                             label = _shipment_display_label(
                                 detail,
                                 fallback_number=str(sh.get('number') or f'Shipment {idx + 1}'),
@@ -1100,6 +1291,8 @@ def render_nabtesco_editor():
                         st.session_state['nab_fetched_csv_bytes'] = None
                         st.session_state['nab_selected_shipment_number'] = ''
                         st.session_state['nab_selected_shipment_summary'] = ''
+                        if fetched_customer_po:
+                            st.session_state['nabtesco_customer_po'] = fetched_customer_po
                         if options:
                             if len(options) == 1:
                                 st.session_state['nab_selected_shipment_label'] = options[0]

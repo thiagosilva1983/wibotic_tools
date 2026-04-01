@@ -1209,11 +1209,24 @@ def render_nabtesco_editor():
                 'nab_selected_shipment_label',
                 'nab_fetch_status',
                 'nab_selected_shipment_summary',
+                'nabtesco_customer_po',
+                'nabtesco_customer_po_input',
             ]:
                 st.session_state.pop(k, None)
             st.rerun()
 
-        customer_po = st.text_input('Customer Purchase Order', key='nabtesco_customer_po')
+        def _sync_nabtesco_customer_po_from_widget():
+            st.session_state['nabtesco_customer_po'] = st.session_state.get('nabtesco_customer_po_input', '')
+
+        po_value = st.session_state.get('nabtesco_customer_po', '')
+        if st.session_state.get('nabtesco_customer_po_input') != po_value:
+            st.session_state['nabtesco_customer_po_input'] = po_value
+        customer_po = st.text_input(
+            'Customer Purchase Order',
+            key='nabtesco_customer_po_input',
+            on_change=_sync_nabtesco_customer_po_from_widget,
+        )
+        st.session_state['nabtesco_customer_po'] = customer_po
         preset = st.radio('Label size preset', ['4.00 × 2.32', '6.00 × 2.32', 'Custom'], horizontal=True, key='nab_size_preset', label_visibility='collapsed')
         preset_map = {'4.00 × 2.32': (4.0, 2.32), '6.00 × 2.32': (6.0, 2.32)}
 

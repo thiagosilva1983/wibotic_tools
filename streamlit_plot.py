@@ -1,3 +1,4 @@
+# Rev I - shipment selector for split Sales Orders
 import io
 import base64
 import re
@@ -950,6 +951,65 @@ def _render_jabil_help(label_csv=None):
 
 
 
+def _shipment_display_label(detail: Dict[str, Any], fallback_number: str = '', fallback_date: str = '', fallback_status: str = '', fallback_tracking: str = '') -> str:
+    number = str(detail.get('number') or fallback_number or '').strip()
+    date = str(detail.get('date') or fallback_date or '').strip()
+    status = str(detail.get('status') or fallback_status or '').strip()
+    tracking = str(
+        detail.get('trackingNumber')
+        or detail.get('tracking')
+        or detail.get('trackingNo')
+        or fallback_tracking
+        or ''
+    ).strip()
+
+    parts = [p for p in [number, date, status] if p]
+    if tracking:
+        parts.append(f'Tracking: {tracking}')
+    return ' | '.join(parts) if parts else 'Shipment'
+
+
+def _shipment_detail_summary(detail: Dict[str, Any]) -> str:
+    number = str(detail.get('number') or '').strip()
+    date = str(detail.get('date') or '').strip()
+    status = str(detail.get('status') or '').strip()
+    tracking = str(detail.get('trackingNumber') or detail.get('tracking') or '').strip()
+    lines = SOSReadonlyClient.extract_shipment_lines(detail)
+    qty_total = 0
+    for ln in lines:
+        shipped = ln.get('quantity') or ln.get('qty') or ln.get('quantityShipped') or ln.get('shippedQuantity') or 0
+        try:
+            qty_total += int(float(shipped))
+        except Exception:
+            pass
+    parts = []
+    if number:
+        parts.append(f'Shipment: {number}')
+    if date:
+        parts.append(f'Date: {date}')
+    if status:
+        parts.append(f'Status: {status}')
+    parts.append(f'Lines: {len(lines)}')
+    parts.append(f'Qty total: {qty_total}')
+    if tracking:
+        parts.append(f'Tracking: {tracking}')
+    return ' | '.join(parts)
+
+
+def _load_selected_nabtesco_shipment(selection_label: str) -> None:
+    details_map = st.session_state.get('nab_shipment_detail_map') or {}
+    selected_detail = details_map.get(selection_label)
+    if selected_detail is None:
+        st.session_state['nab_fetched_csv_bytes'] = None
+        st.session_state['nab_selected_shipment_number'] = ''
+        st.session_state['nab_selected_shipment_summary'] = ''
+        return
+
+    st.session_state['nab_fetched_csv_bytes'] = build_nabtesco_csv_from_shipment_detail(selected_detail)
+    st.session_state['nab_selected_shipment_number'] = str(selected_detail.get('number') or '')
+    st.session_state['nab_selected_shipment_summary'] = _shipment_detail_summary(selected_detail)
+
+
 def render_nabtesco_editor():
     st.markdown('### Nabtesco')
     editor_col, preview_col = st.columns([0.95, 1.35], gap='large')
@@ -961,7 +1021,15 @@ def render_nabtesco_editor():
         fetch_col, clear_col = st.columns([1.2, 0.8])
         fetch_clicked = fetch_col.button('Fetch Shipment from SOS', use_container_width=True, key='nab_fetch_shipment')
         if clear_col.button('Clear fetched shipment', use_container_width=True, key='nab_clear_fetched'):
-            for k in ['nab_fetched_csv_bytes','nab_shipment_options','nab_selected_shipment_number','nab_fetch_status']:
+            for k in [
+                'nab_fetched_csv_bytes',
+                'nab_shipment_options',
+                'nab_shipment_detail_map',
+                'nab_selected_shipment_number',
+                'nab_selected_shipment_label',
+                'nab_fetch_status',
+                'nab_selected_shipment_summary',
+            ]:
                 st.session_state.pop(k, None)
             st.rerun()
 
@@ -1017,22 +1085,30 @@ def render_nabtesco_editor():
                             if not sh_id:
                                 continue
                             detail = client.get_shipment_detail(int(sh_id))
-                            num = str(detail.get('number') or sh.get('number') or f'Shipment {idx+1}')
-                            date = str(detail.get('date') or sh.get('date') or '')
-                            label = f"{num} | {date}"
+                            label = _shipment_display_label(
+                                detail,
+                                fallback_number=str(sh.get('number') or f'Shipment {idx + 1}'),
+                                fallback_date=str(sh.get('date') or ''),
+                                fallback_status=str(sh.get('status') or ''),
+                                fallback_tracking=str(sh.get('trackingNumber') or sh.get('tracking') or ''),
+                            )
                             options.append(label)
                             details_map[label] = detail
-                        progress.progress(70, text='Converting shipment to label rows...')
+                        progress.progress(70, text='Preparing shipment selector...')
                         st.session_state['nab_shipment_options'] = options
                         st.session_state['nab_shipment_detail_map'] = details_map
+                        st.session_state['nab_fetched_csv_bytes'] = None
+                        st.session_state['nab_selected_shipment_number'] = ''
+                        st.session_state['nab_selected_shipment_summary'] = ''
                         if options:
-                            st.session_state['nab_selected_shipment_label'] = options[0]
-                            detail = details_map[options[0]]
-                            st.session_state['nab_fetched_csv_bytes'] = build_nabtesco_csv_from_shipment_detail(detail)
-                            st.session_state['nab_selected_shipment_number'] = str(detail.get('number') or '')
-                            st.session_state['nab_fetch_status'] = f"Fetched {len(options)} shipment(s) from SOS."
+                            if len(options) == 1:
+                                st.session_state['nab_selected_shipment_label'] = options[0]
+                                _load_selected_nabtesco_shipment(options[0])
+                                st.session_state['nab_fetch_status'] = 'Fetched 1 shipment from SOS and selected it automatically.'
+                            else:
+                                st.session_state['nab_selected_shipment_label'] = ''
+                                st.session_state['nab_fetch_status'] = f'Fetched {len(options)} shipments from SOS. Select one shipment to generate labels.'
                         else:
-                            st.session_state['nab_fetched_csv_bytes'] = None
                             st.session_state['nab_fetch_status'] = 'No shipment found for that Sales Order.'
                         progress.progress(100, text='Done.')
                     except Exception as e:
@@ -1044,12 +1120,47 @@ def render_nabtesco_editor():
 
         options = st.session_state.get('nab_shipment_options') or []
         if options:
-            selected_label = st.selectbox('Fetched shipment', options, key='nab_selected_shipment_label')
-            details_map = st.session_state.get('nab_shipment_detail_map') or {}
-            selected_detail = details_map.get(selected_label)
-            if selected_detail is not None:
-                st.session_state['nab_fetched_csv_bytes'] = build_nabtesco_csv_from_shipment_detail(selected_detail)
-                st.session_state['nab_selected_shipment_number'] = str(selected_detail.get('number') or '')
+            if len(options) == 1:
+                st.caption('One shipment found in SOS. It was selected automatically.')
+                st.selectbox('Fetched shipment', options, index=0, key='nab_selected_shipment_label', disabled=True)
+            else:
+                current = st.session_state.get('nab_selected_shipment_label', '')
+                select_options = [''] + options
+                try:
+                    index = select_options.index(current)
+                except ValueError:
+                    index = 0
+                selected_label = st.selectbox(
+                    'Select shipment for label generation',
+                    select_options,
+                    index=index,
+                    key='nab_selected_shipment_selector',
+                    format_func=lambda x: 'Choose a shipment...' if x == '' else x,
+                )
+                if selected_label != current:
+                    st.session_state['nab_selected_shipment_label'] = selected_label
+                    _load_selected_nabtesco_shipment(selected_label)
+
+            selected_label = st.session_state.get('nab_selected_shipment_label', '')
+            if selected_label:
+                details_map = st.session_state.get('nab_shipment_detail_map') or {}
+                selected_detail = details_map.get(selected_label)
+                if selected_detail is not None:
+                    if not st.session_state.get('nab_selected_shipment_number'):
+                        _load_selected_nabtesco_shipment(selected_label)
+                    summary = st.session_state.get('nab_selected_shipment_summary', '')
+                    if summary:
+                        st.caption(summary)
+                    st.download_button(
+                        'Download selected shipment CSV',
+                        st.session_state.get('nab_fetched_csv_bytes') or b'',
+                        file_name=f"{st.session_state.get('nab_selected_shipment_number') or 'shipment'}_labels_source.csv",
+                        mime='text/csv',
+                        use_container_width=True,
+                        key='nab_download_selected_shipment_csv',
+                    )
+            else:
+                st.info('Choose one shipment above. Labels will be generated only from the selected shipment.')
 
     active_csv = label_csv
     fetched_csv_bytes = st.session_state.get('nab_fetched_csv_bytes')
@@ -1059,14 +1170,21 @@ def render_nabtesco_editor():
 
     if active_csv is None:
         with preview_col:
-            st.info('Upload a CSV or fetch a shipment from SOS to open the label preview.')
+            if options and len(options) > 1 and not st.session_state.get('nab_selected_shipment_label'):
+                st.info('Select the shipment you want, then the preview will load for that shipment only.')
+            else:
+                st.info('Upload a CSV or fetch a shipment from SOS to open the label preview.')
         return
     try:
         labels_df = parse_nabtesco_labels(active_csv)
         settings = _label_settings_dict(label_width, label_height, font_size, x_offset, y_offset, line_spacing, logo_scale)
         so_for_label = (st.session_state.get('nab_selected_shipment_number') or sales_order or '').strip()
+        selected_from_sos = bool(st.session_state.get('nab_selected_shipment_number'))
         with editor_col:
-            st.success(f'{len(labels_df)} labels created.')
+            if selected_from_sos:
+                st.success(f"{len(labels_df)} labels created from shipment {so_for_label}.")
+            else:
+                st.success(f'{len(labels_df)} labels created.')
         with preview_col:
             export_col, mode_col = st.columns([1.0, 1.2], gap='small')
             with export_col:

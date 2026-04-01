@@ -510,7 +510,9 @@ def draw_label_on_canvas(c, label, label_width, label_height, settings, sales_or
 
     c.drawString(x, y, f'Sales Order: {sales_order}')
     y -= line_spacing
-    c.drawString(x, y, f'Customer Purchase Order: {customer_po}')
+    c.drawString(x, y, 'Customer Purchase Order:')
+    y -= line_spacing
+    c.drawString(x, y, f'{customer_po}')
     y -= line_spacing
 
     for key in ['Part Number', 'Part Name', 'Serial Number', 'Quantity']:
@@ -557,7 +559,8 @@ def build_label_preview_image(label, sales_order, customer_po, settings, scale=2
 
     lines = [
         f'Sales Order: {sales_order}',
-        f'Customer Purchase Order: {customer_po}',
+        'Customer Purchase Order:',
+        f'{customer_po}',
         f"Part Number: {label.get('Part Number', '')}",
         f"Part Name: {label.get('Part Name', '')}",
         f"Serial Number: {label.get('Serial Number', '')}",

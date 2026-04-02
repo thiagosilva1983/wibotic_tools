@@ -3290,6 +3290,64 @@ def weekly_render_display_table(board_df: pd.DataFrame, title: str, force_green:
         st.dataframe(shown, use_container_width=True, hide_index=True, height=min(680, 38 * (len(shown) + 1)))
 
 
+
+
+def weekly_production_reorder_so(df, target_so, direction='up'):
+    """Move an entire sales-order block up or down by swapping SO priorities/order."""
+    import pandas as pd
+
+    if df is None:
+        return pd.DataFrame()
+    out = df.copy()
+    if out.empty or 'so_number' not in out.columns:
+        return out
+
+    # normalize first
+    try:
+        out = weekly_production_normalize_df(out)
+    except Exception:
+        pass
+
+    so_series = out['so_number'].fillna('').astype(str).str.strip()
+    if not target_so:
+        return out
+    target_so = str(target_so).strip()
+    if target_so not in set(so_series):
+        return out
+
+    # current SO order by priority then first appearance
+    first_pos = {}
+    for idx, so in enumerate(so_series.tolist()):
+        if so and so not in first_pos:
+            first_pos[so] = idx
+
+    if 'priority' in out.columns:
+        pr = pd.to_numeric(out['priority'], errors='coerce').fillna(10**9)
+        temp = pd.DataFrame({'so': so_series, 'priority': pr})
+        so_order = (
+            temp.groupby('so', as_index=False)['priority'].min()
+            .assign(first_pos=lambda d: d['so'].map(first_pos))
+            .sort_values(['priority', 'first_pos', 'so'])
+        )['so'].tolist()
+    else:
+        so_order = list(first_pos.keys())
+
+    so_order = [s for s in so_order if s]
+    if target_so not in so_order:
+        return out
+
+    i = so_order.index(target_so)
+    if direction == 'up' and i > 0:
+        so_order[i-1], so_order[i] = so_order[i], so_order[i-1]
+    elif direction == 'down' and i < len(so_order) - 1:
+        so_order[i+1], so_order[i] = so_order[i], so_order[i+1]
+    else:
+        return out
+
+    priority_map = {so: idx + 1 for idx, so in enumerate(so_order)}
+    out['priority'] = so_series.map(priority_map).fillna(0).astype(int)
+    return out
+
 def render_weekly_production_workspace():
     st.subheader('Weekly Production')
     st.caption('Live weekly production board from SOS. Priority is per sales order, item lines are grouped underneath, and shipped rows are highlighted green.')

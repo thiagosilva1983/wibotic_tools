@@ -2960,14 +2960,18 @@ def weekly_status_is_openish(status_text: str) -> bool:
     return any(x in t for x in ['open', 'partial', 'pending', 'backorder', 'back order', 'approved'])
 
 
-def weekly_list_open_sales_order_numbers(client: SOSReadonlyClient, maxresults: int = 250) -> List[str]:
+def weekly_list_open_sales_order_summaries(client: SOSReadonlyClient, maxresults: int = 1000) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
-    seen_ids = set()
+    seen_keys = set()
 
     query_variants = [
-        {'query': 'Open', 'maxresults': maxresults},
         {'maxresults': maxresults},
+        {'query': 'Open', 'maxresults': maxresults},
+        {'query': 'Pending', 'maxresults': maxresults},
+        {'query': 'Partial', 'maxresults': maxresults},
+        {'query': 'Approved', 'maxresults': maxresults},
     ]
+
     for params in query_variants:
         try:
             resp = client._get('salesorder', params=params)
@@ -2975,31 +2979,39 @@ def weekly_list_open_sales_order_numbers(client: SOSReadonlyClient, maxresults: 
         except Exception:
             data = []
         for row in data:
+            so_number = _weekly_text(row.get('number'), row.get('transactionNumber'))
             row_id = row.get('id')
-            if row_id in seen_ids:
+            key = row_id if row_id is not None else so_number
+            if not key:
                 continue
-            seen_ids.add(row_id)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
             candidates.append(row)
 
-    open_numbers: List[str] = []
+    open_rows: List[Dict[str, Any]] = []
+    seen_numbers = set()
     for row in candidates:
         so_number = _weekly_text(row.get('number'), row.get('transactionNumber'))
-        if not so_number:
+        if not so_number or so_number in seen_numbers:
             continue
         status_text = weekly_extract_so_status(row)
         if weekly_status_is_closed(status_text):
             continue
-        if not status_text or weekly_status_is_openish(status_text):
-            open_numbers.append(so_number)
+        if status_text and not weekly_status_is_openish(status_text):
+            continue
+        open_rows.append(row)
+        seen_numbers.add(so_number)
 
-    deduped: List[str] = []
-    seen = set()
-    for so in open_numbers:
-        so = str(so).strip()
-        if so and so not in seen:
-            deduped.append(so)
-            seen.add(so)
-    return deduped
+    return open_rows
+
+
+def weekly_list_open_sales_order_numbers(client: SOSReadonlyClient, maxresults: int = 1000) -> List[str]:
+    return [
+        _weekly_text(row.get('number'), row.get('transactionNumber'))
+        for row in weekly_list_open_sales_order_summaries(client, maxresults=maxresults)
+        if _weekly_text(row.get('number'), row.get('transactionNumber'))
+    ]
 
 
 def weekly_production_rows_from_sales_order(client: SOSReadonlyClient, so_number: str) -> pd.DataFrame:
@@ -3146,6 +3158,151 @@ def weekly_production_rows_from_sales_order(client: SOSReadonlyClient, so_number
     return weekly_production_normalize_df(pd.DataFrame(rows))
 
 
+
+def weekly_production_rows_from_sales_order_summary(client: SOSReadonlyClient, so_summary: Dict[str, Any]) -> pd.DataFrame:
+    so_number = _weekly_text(so_summary.get('number'), so_summary.get('transactionNumber'))
+    so_id = so_summary.get('id')
+    if so_id is None:
+        return weekly_production_rows_from_sales_order(client, so_number)
+    try:
+        so_detail = client.get_sales_order_detail(int(so_id))
+    except Exception:
+        return weekly_production_rows_from_sales_order(client, so_number)
+
+    lines = client.extract_sales_order_lines(so_detail)
+    if not lines:
+        return weekly_production_rows_from_sales_order(client, so_number)
+
+    customer = _weekly_text(
+        (so_detail.get('customer') or {}).get('name') if isinstance(so_detail.get('customer'), dict) else '',
+        so_detail.get('customerName'),
+        so_summary.get('customerName'),
+        so_summary.get('customer'),
+    )
+    so_notes = _weekly_text(so_detail.get('memo'), so_summary.get('memo'))
+
+    shipped_map: Dict[str, int] = {}
+    date_map: Dict[str, List[str]] = {}
+    tracking_map: Dict[str, List[str]] = {}
+
+    line_has_shipped_qty = False
+    for ln in lines:
+        item_obj = ln.get('item') or {}
+        product = _weekly_text(item_obj.get('name'), item_obj.get('fullname'), ln.get('itemName'), ln.get('name'), ln.get('description'))
+        if not product:
+            continue
+        raw_shipped = ln.get('quantityShipped')
+        if raw_shipped is None:
+            raw_shipped = ln.get('shippedQuantity')
+        if raw_shipped is None:
+            raw_shipped = ln.get('qtyShipped')
+        if raw_shipped is None:
+            raw_shipped = ln.get('fulfilledQuantity')
+        if raw_shipped is None:
+            raw_shipped = ln.get('quantityFulfilled')
+        try:
+            shipped_qty = int(float(raw_shipped or 0))
+        except Exception:
+            shipped_qty = 0
+        if raw_shipped is not None:
+            line_has_shipped_qty = True
+        shipped_map[product] = shipped_map.get(product, 0) + shipped_qty
+
+    try:
+        shipments = client.get_shipments_for_sales_order(so_number, maxresults=200)
+    except Exception:
+        shipments = []
+
+    for shipment in shipments:
+        ship_date = _weekly_text(shipment.get('date'), shipment.get('shipDate'), shipment.get('transactionDate'))
+        tracking = _weekly_text(shipment.get('trackingNumber'), shipment.get('tracking'), shipment.get('trackingNo'))
+        if ship_date:
+            date_map.setdefault('__all__', []).append(ship_date)
+        if tracking:
+            tracking_map.setdefault('__all__', []).append(tracking)
+
+    if not line_has_shipped_qty:
+        for shipment in shipments:
+            shipment_id = shipment.get('id')
+            ship_date = _weekly_text(shipment.get('date'), shipment.get('shipDate'), shipment.get('transactionDate'))
+            tracking = _weekly_text(shipment.get('trackingNumber'), shipment.get('tracking'), shipment.get('trackingNo'))
+            if not shipment_id:
+                continue
+            try:
+                sh_detail = client.get_shipment_detail(int(shipment_id))
+            except Exception:
+                continue
+            sh_lines = client.extract_shipment_lines(sh_detail)
+            for sh_line in sh_lines:
+                item_obj = sh_line.get('item') or {}
+                key = _weekly_text(item_obj.get('name'), item_obj.get('fullname'), sh_line.get('itemName'), sh_line.get('name'))
+                if not key:
+                    key = _weekly_text(sh_line.get('description'), sh_line.get('itemDescription'))
+                if not key:
+                    continue
+                try:
+                    shipped_qty = int(float(sh_line.get('quantity') or sh_line.get('qty') or sh_line.get('quantityShipped') or sh_line.get('shippedQuantity') or 0))
+                except Exception:
+                    shipped_qty = 0
+                shipped_map[key] = shipped_map.get(key, 0) + shipped_qty
+                if ship_date:
+                    date_map.setdefault(key, []).append(ship_date)
+                if tracking:
+                    tracking_map.setdefault(key, []).append(tracking)
+
+    rows: List[Dict[str, Any]] = []
+    all_ship_dates = ', '.join(sorted(set(date_map.get('__all__', []))))
+    all_tracking = ', '.join(sorted(set(tracking_map.get('__all__', []))))
+    for ln in lines:
+        item_obj = ln.get('item') or {}
+        product = _weekly_text(item_obj.get('name'), item_obj.get('fullname'), ln.get('itemName'), ln.get('name'), ln.get('description'))
+        if not product:
+            continue
+        product_type = _weekly_text(item_obj.get('type'), ln.get('type'), ln.get('itemType'))
+        try:
+            qty_ordered = int(float(ln.get('quantity') or ln.get('qty') or 0))
+        except Exception:
+            qty_ordered = 0
+        qty_shipped = int(shipped_map.get(product, 0))
+        raw_invoiced = ln.get('quantityInvoiced')
+        if raw_invoiced is None:
+            raw_invoiced = ln.get('invoicedQuantity')
+        if raw_invoiced is None:
+            raw_invoiced = ln.get('qtyInvoiced')
+        try:
+            qty_invoiced = int(float(raw_invoiced or 0))
+        except Exception:
+            qty_invoiced = 0
+        qty_remaining = max(qty_ordered - qty_shipped, 0)
+        shipped_dates = ', '.join(sorted(set(date_map.get(product, [])))) or all_ship_dates
+        tracking_numbers = ', '.join(sorted(set(tracking_map.get(product, [])))) or all_tracking
+        notes = _weekly_text(ln.get('memo'), ln.get('notes'), so_notes)
+        rows.append({
+            'Priority': 0,
+            'Customer': customer,
+            'Product Type': product_type,
+            'Product': product,
+            'SO Number': so_number,
+            'QTY Ordered': qty_ordered,
+            'QTY Shipped': qty_shipped,
+            'QTY Invoiced': qty_invoiced,
+            'QTY Remaining': qty_remaining,
+            'Date Shipped': shipped_dates,
+            'Tracking Number': tracking_numbers,
+            'Status': '',
+            'Assigned To': '',
+            'Blocker': '',
+            'Notes': notes,
+            'Updated By': '',
+            'Last Updated At': '',
+        })
+
+    if not rows:
+        raise ValueError(f'Sales Order {so_number} did not produce any usable rows.')
+
+    return weekly_production_normalize_df(pd.DataFrame(rows))
+
+
 def weekly_merge_live_board_with_state(live_df: pd.DataFrame, state: Dict[str, Any]) -> pd.DataFrame:
     live_df = weekly_production_normalize_df(live_df)
     overrides = (state or {}).get('so_overrides') or {}
@@ -3179,21 +3336,32 @@ def weekly_refresh_from_open_sales_orders(
     state = weekly_prod_load_state()
     if progress_callback:
         progress_callback('Loading current open sales orders...')
-    open_sos = weekly_list_open_sales_order_numbers(client, maxresults=250)
+    open_rows = weekly_list_open_sales_order_summaries(client, maxresults=1000)
+    open_sos = [
+        _weekly_text(row.get('number'), row.get('transactionNumber'))
+        for row in open_rows
+        if _weekly_text(row.get('number'), row.get('transactionNumber'))
+    ]
     if progress_callback:
         progress_callback(f'Found {len(open_sos)} open sales order(s).')
     rows: List[pd.DataFrame] = []
-    total = len(open_sos)
-    for idx, so in enumerate(open_sos, start=1):
+    failures: List[str] = []
+    total = len(open_rows)
+    for idx, so_row in enumerate(open_rows, start=1):
+        so = _weekly_text(so_row.get('number'), so_row.get('transactionNumber'))
         if progress_callback:
             progress_callback(f'Loading sales order {idx}/{total}: {so}')
         try:
-            rows.append(weekly_production_rows_from_sales_order(client, so))
-        except Exception:
+            rows.append(weekly_production_rows_from_sales_order_summary(client, so_row))
+        except Exception as exc:
+            failures.append(f'{so}: {exc}')
             continue
     live_df = pd.concat(rows, ignore_index=True) if rows else weekly_production_empty_df()
     if progress_callback:
-        progress_callback('Merging saved priority and notes...')
+        msg = f'Merging saved priority and notes... loaded {len(rows)}/{total} sales orders.'
+        if failures:
+            msg += f' Skipped {len(failures)}.'
+        progress_callback(msg)
     merged_live = weekly_merge_live_board_with_state(live_df, state)
     shipped_this_week_df = weekly_build_shipped_this_week_df(existing_board, open_sos)
     return merged_live, shipped_this_week_df, open_sos

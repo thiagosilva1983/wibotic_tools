@@ -2626,6 +2626,37 @@ def weekly_prod_build_so_overrides(df: pd.DataFrame) -> Dict[str, Dict[str, Any]
     return out
 
 
+
+def weekly_production_reset_priorities(df: pd.DataFrame, ordered_sos: Optional[List[str]] = None) -> pd.DataFrame:
+    """Reassign sequential SO-level priorities while keeping all item rows in the same SO together."""
+    if df is None:
+        return weekly_production_empty_df()
+    out = weekly_production_normalize_df(df)
+    if out.empty or 'SO Number' not in out.columns:
+        return out
+
+    seen = set()
+    so_order = []
+    if ordered_sos:
+        for so in ordered_sos:
+            so_txt = str(so or '').strip()
+            if so_txt and so_txt not in seen:
+                seen.add(so_txt)
+                so_order.append(so_txt)
+
+    for so in out['SO Number'].fillna('').astype(str):
+        so_txt = so.strip()
+        if so_txt and so_txt not in seen:
+            seen.add(so_txt)
+            so_order.append(so_txt)
+
+    priority_map = {so: idx + 1 for idx, so in enumerate(so_order)}
+    out['_so_sort'] = out['SO Number'].fillna('').astype(str).str.strip().map(priority_map).fillna(999999).astype(int)
+    out['Priority'] = out['SO Number'].fillna('').astype(str).str.strip().map(priority_map).fillna(0).astype(int)
+    out = out.sort_values(['_so_sort'], kind='stable').drop(columns=['_so_sort'])
+    out = out.reset_index(drop=True)
+    return out
+
 def weekly_prod_apply_so_overrides(df: pd.DataFrame, overrides: Dict[str, Dict[str, Any]]) -> pd.DataFrame:
     if df is None or len(df) == 0:
         return weekly_production_empty_df()

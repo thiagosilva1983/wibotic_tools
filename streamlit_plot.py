@@ -2391,8 +2391,300 @@ SOS_REDIRECT_URI="https://your-app.streamlit.app/""" , language='toml')
     with tab5:
         render_sos_help_tab()
 
+
+
+def weekly_production_empty_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=[
+        'Priority', 'Customer', 'Product Type', 'Product', 'SO Number',
+        'QTY Ordered', 'QTY Shipped', 'QTY Remaining', 'Date Shipped',
+        'Tracking Number', 'Notes'
+    ])
+
+
+def weekly_production_normalize_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    base = weekly_production_empty_df()
+    if df is None or len(df) == 0:
+        return base.copy()
+    out = df.copy()
+    for col in base.columns:
+        if col not in out.columns:
+            out[col] = '' if col not in ['Priority', 'QTY Ordered', 'QTY Shipped', 'QTY Remaining'] else 0
+    out = out[base.columns].copy()
+    for col in ['Priority', 'QTY Ordered', 'QTY Shipped', 'QTY Remaining']:
+        out[col] = pd.to_numeric(out[col], errors='coerce').fillna(0).astype(int)
+    out['SO Number'] = out['SO Number'].astype(str).str.strip()
+    out['Customer'] = out['Customer'].astype(str)
+    out['Product Type'] = out['Product Type'].astype(str)
+    out['Product'] = out['Product'].astype(str)
+    out['Date Shipped'] = out['Date Shipped'].astype(str)
+    out['Tracking Number'] = out['Tracking Number'].astype(str)
+    out['Notes'] = out['Notes'].astype(str)
+    if out['Priority'].eq(0).all():
+        order = []
+        seen = set()
+        for so in out['SO Number'].tolist():
+            if so and so not in seen:
+                order.append(so)
+                seen.add(so)
+        priority_map = {so: i + 1 for i, so in enumerate(order)}
+        out['Priority'] = out['SO Number'].map(priority_map).fillna(0).astype(int)
+    return weekly_production_reset_priorities(out)
+
+
+
+def weekly_production_reset_priorities(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if out.empty:
+        return weekly_production_empty_df()
+    ordered_sos = []
+    seen = set()
+    for so in out['SO Number'].astype(str).tolist():
+        if so and so not in seen:
+            ordered_sos.append(so)
+            seen.add(so)
+    priority_map = {so: i + 1 for i, so in enumerate(ordered_sos)}
+    out['Priority'] = out['SO Number'].map(priority_map).fillna(0).astype(int)
+    out = out.sort_values(['Priority', 'SO Number', 'Product'], kind='stable').reset_index(drop=True)
+    return out
+
+
+
+def weekly_production_reorder_so(df: pd.DataFrame, so_number: str, direction: str) -> pd.DataFrame:
+    out = weekly_production_normalize_df(df)
+    so_number = str(so_number or '').strip()
+    if out.empty or not so_number:
+        return out
+    groups = []
+    for so, block in out.groupby('SO Number', sort=False):
+        groups.append((so, block.copy()))
+    idx = next((i for i, (so, _block) in enumerate(groups) if so == so_number), None)
+    if idx is None:
+        return out
+    if direction == 'up' and idx > 0:
+        groups[idx - 1], groups[idx] = groups[idx], groups[idx - 1]
+    elif direction == 'down' and idx < len(groups) - 1:
+        groups[idx + 1], groups[idx] = groups[idx], groups[idx + 1]
+    rebuilt = pd.concat([block for _so, block in groups], ignore_index=True) if groups else weekly_production_empty_df()
+    return weekly_production_reset_priorities(rebuilt)
+
+
+
+def _weekly_text(*values: Any) -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text and text.lower() not in {'none', 'nan'}:
+            return text
+    return ''
+
+
+
+def weekly_production_rows_from_sales_order(client: SOSReadonlyClient, so_number: str) -> pd.DataFrame:
+    so_number = str(so_number or '').strip()
+    if not so_number:
+        raise ValueError('Enter a Sales Order number first.')
+
+    so_obj = client.get_sales_order_by_number(so_number)
+    if not so_obj:
+        raise ValueError(f'Sales Order {so_number} was not found in SOS.')
+
+    so_detail = client.get_sales_order_detail(int(so_obj.get('id')))
+    lines = client.extract_sales_order_lines(so_detail)
+    if not lines:
+        raise ValueError(f'Sales Order {so_number} has no lines.')
+
+    customer = _weekly_text(
+        (so_detail.get('customer') or {}).get('name') if isinstance(so_detail.get('customer'), dict) else '',
+        so_detail.get('customerName'),
+        so_obj.get('customerName'),
+        so_obj.get('customer'),
+    )
+    so_notes = _weekly_text(so_detail.get('memo'), so_obj.get('memo'))
+
+    shipped_map: Dict[str, int] = {}
+    date_map: Dict[str, List[str]] = {}
+    tracking_map: Dict[str, List[str]] = {}
+
+    try:
+        shipments = client.get_shipments_for_sales_order(so_number, maxresults=50)
+    except Exception:
+        shipments = []
+
+    for shipment in shipments:
+        shipment_id = shipment.get('id')
+        ship_date = _weekly_text(shipment.get('date'), shipment.get('shipDate'), shipment.get('transactionDate'))
+        tracking = _weekly_text(shipment.get('trackingNumber'), shipment.get('tracking'), shipment.get('trackingNo'))
+        if not shipment_id:
+            continue
+        try:
+            sh_detail = client.get_shipment_detail(int(shipment_id))
+        except Exception:
+            continue
+        sh_lines = client.extract_shipment_lines(sh_detail)
+        for sh_line in sh_lines:
+            item_obj = sh_line.get('item') or {}
+            key = _weekly_text(item_obj.get('name'), item_obj.get('fullname'), sh_line.get('itemName'), sh_line.get('name'))
+            if not key:
+                key = _weekly_text(sh_line.get('description'), sh_line.get('itemDescription'))
+            if not key:
+                continue
+            try:
+                shipped_qty = int(float(sh_line.get('quantity') or sh_line.get('qty') or sh_line.get('quantityShipped') or sh_line.get('shippedQuantity') or 0))
+            except Exception:
+                shipped_qty = 0
+            shipped_map[key] = shipped_map.get(key, 0) + shipped_qty
+            if ship_date:
+                date_map.setdefault(key, []).append(ship_date)
+            if tracking:
+                tracking_map.setdefault(key, []).append(tracking)
+
+    rows: List[Dict[str, Any]] = []
+    for ln in lines:
+        item_obj = ln.get('item') or {}
+        product = _weekly_text(item_obj.get('name'), item_obj.get('fullname'), ln.get('itemName'), ln.get('name'), ln.get('description'))
+        if not product:
+            continue
+        product_type = _weekly_text(item_obj.get('type'), ln.get('type'), ln.get('itemType'))
+        try:
+            qty_ordered = int(float(ln.get('quantity') or ln.get('qty') or 0))
+        except Exception:
+            qty_ordered = 0
+        qty_shipped = int(shipped_map.get(product, 0))
+        qty_remaining = max(qty_ordered - qty_shipped, 0)
+        shipped_dates = ', '.join(sorted(set(date_map.get(product, []))))
+        tracking_numbers = ', '.join(sorted(set(tracking_map.get(product, []))))
+        notes = _weekly_text(ln.get('memo'), ln.get('notes'), so_notes)
+        rows.append({
+            'Priority': 0,
+            'Customer': customer,
+            'Product Type': product_type,
+            'Product': product,
+            'SO Number': so_number,
+            'QTY Ordered': qty_ordered,
+            'QTY Shipped': qty_shipped,
+            'QTY Remaining': qty_remaining,
+            'Date Shipped': shipped_dates,
+            'Tracking Number': tracking_numbers,
+            'Notes': notes,
+        })
+
+    if not rows:
+        raise ValueError(f'Sales Order {so_number} did not produce any usable rows.')
+
+    return weekly_production_normalize_df(pd.DataFrame(rows))
+
+
+
+def render_weekly_production_workspace():
+    st.subheader('Weekly Production')
+    st.caption('Build a weekly production board from SOS sales orders, edit it like a spreadsheet, and prioritize sales orders by moving them up or down.')
+
+    auth_url = sos_build_auth_url()
+    client: Optional[SOSReadonlyClient] = None
+    try:
+        client, status_text = sos_get_authenticated_client()
+    except Exception as exc:
+        client = None
+        status_text = str(exc)
+
+    if 'weekly_prod_df' not in st.session_state:
+        st.session_state['weekly_prod_df'] = weekly_production_empty_df()
+
+    st.session_state['weekly_prod_df'] = weekly_production_normalize_df(st.session_state.get('weekly_prod_df'))
+
+    with st.expander('SOS connection', expanded=False):
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            st.metric('Connection', 'Ready' if client else 'Not ready')
+        with c2:
+            st.write(status_text)
+            if auth_url:
+                st.markdown(f'[Connect to SOS]({auth_url})')
+
+    controls_left, controls_right = st.columns([1.2, 1.8])
+
+    with controls_left:
+        st.markdown('#### Add sales order')
+        so_input = st.text_input('Sales Order number', key='weekly_prod_so_input', placeholder='SO-2026-160')
+        a1, a2, a3 = st.columns(3)
+        if a1.button('Add from SOS', key='weekly_add_from_sos', use_container_width=True):
+            if client is None:
+                st.error('SOS is not connected yet.')
+            else:
+                try:
+                    new_rows = weekly_production_rows_from_sales_order(client, so_input)
+                    board = st.session_state['weekly_prod_df'].copy()
+                    so_number = str(so_input).strip()
+                    if not board.empty and so_number in board['SO Number'].astype(str).tolist():
+                        board = board[board['SO Number'].astype(str) != so_number].reset_index(drop=True)
+                    board = pd.concat([board, new_rows], ignore_index=True)
+                    st.session_state['weekly_prod_df'] = weekly_production_reset_priorities(board)
+                    st.success(f'Added {len(new_rows)} row(s) from {so_number}.')
+                except Exception as exc:
+                    st.error(str(exc))
+        if a2.button('Clear board', key='weekly_clear_board', use_container_width=True):
+            st.session_state['weekly_prod_df'] = weekly_production_empty_df()
+            st.rerun()
+        uploaded_board = a3.file_uploader('Load CSV', type=['csv'], key='weekly_prod_upload', label_visibility='collapsed')
+        if uploaded_board is not None:
+            try:
+                loaded = pd.read_csv(uploaded_board)
+                st.session_state['weekly_prod_df'] = weekly_production_normalize_df(loaded)
+                st.success('Weekly Production CSV loaded.')
+            except Exception as exc:
+                st.error(f'Could not load CSV: {exc}')
+
+    with controls_right:
+        board_df = weekly_production_normalize_df(st.session_state['weekly_prod_df'])
+        sales_orders = list(dict.fromkeys([so for so in board_df['SO Number'].astype(str).tolist() if so]))
+        st.markdown('#### Priority controls')
+        b1, b2, b3, b4 = st.columns([1.4, 1, 1, 1.2])
+        selected_so = b1.selectbox(
+            'Sales Order priority',
+            options=sales_orders,
+            index=0 if sales_orders else None,
+            key='weekly_priority_so',
+            placeholder='Select a sales order',
+            label_visibility='collapsed',
+        )
+        if b2.button('Move up', key='weekly_move_up', use_container_width=True, disabled=not selected_so):
+            st.session_state['weekly_prod_df'] = weekly_production_reorder_so(board_df, selected_so, 'up')
+            st.rerun()
+        if b3.button('Move down', key='weekly_move_down', use_container_width=True, disabled=not selected_so):
+            st.session_state['weekly_prod_df'] = weekly_production_reorder_so(board_df, selected_so, 'down')
+            st.rerun()
+        export_bytes = board_df.to_csv(index=False).encode('utf-8')
+        b4.download_button('Download board CSV', data=export_bytes, file_name='weekly_production_board.csv', mime='text/csv', use_container_width=True)
+
+    board_df = weekly_production_normalize_df(st.session_state['weekly_prod_df'])
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric('Sales Orders', int(board_df['SO Number'].astype(str).nunique()) if not board_df.empty else 0)
+    m2.metric('Rows', len(board_df))
+    m3.metric('Qty Ordered', int(pd.to_numeric(board_df['QTY Ordered'], errors='coerce').fillna(0).sum()) if not board_df.empty else 0)
+    m4.metric('Qty Remaining', int(pd.to_numeric(board_df['QTY Remaining'], errors='coerce').fillna(0).sum()) if not board_df.empty else 0)
+
+    st.markdown('#### Weekly board')
+    edited_df = st.data_editor(
+        board_df,
+        use_container_width=True,
+        num_rows='dynamic',
+        hide_index=True,
+        key='weekly_prod_editor',
+        height=480,
+    )
+    edited_df = weekly_production_normalize_df(pd.DataFrame(edited_df))
+    if not edited_df.equals(board_df):
+        st.session_state['weekly_prod_df'] = edited_df
+
+    with st.expander('Tips', expanded=False):
+        st.write('• Add one sales order at a time from SOS. Each sales-order line becomes one row on the board.')
+        st.write('• Use Move up and Move down to change the production priority of the whole sales order block.')
+        st.write('• You can also edit quantities, tracking, notes, and dates directly in the spreadsheet view, then download the board as CSV.')
+
+
 def render_workspace_selector():
-    options = ['Derate Reports', 'Arduino Viewer', 'Plot Explorer', 'Label Studio', 'RF Calculator', 'SOS Inventory']
+    options = ['Derate Reports', 'Arduino Viewer', 'Plot Explorer', 'Label Studio', 'RF Calculator', 'SOS Inventory', 'Weekly Production']
     selected = st.radio(
         'Workspace',
         options,
@@ -3199,5 +3491,7 @@ elif active_workspace == 'Label Studio':
     render_label_tab()
 elif active_workspace == 'SOS Inventory':
     render_sos_workspace()
+elif active_workspace == 'Weekly Production':
+    render_weekly_production_workspace()
 else:
     render_rf_tab()

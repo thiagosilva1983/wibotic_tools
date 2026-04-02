@@ -2403,6 +2403,22 @@ SOS_REDIRECT_URI="https://your-app.streamlit.app/""" , language='toml')
 
 
 
+def _weekly_text(*values, default=""):
+    """Return the first meaningful text value from candidates for Weekly Production."""
+    for value in values:
+        if value is None:
+            continue
+        try:
+            if pd.isna(value):
+                continue
+        except Exception:
+            pass
+        txt = str(value).replace("\r\n", "\n").replace("\r", "\n").strip()
+        if txt:
+            return txt
+    return default
+
+
 WEEKLY_PROD_STATE_FILE = Path(__file__).with_name('weekly_production_state.json')
 
 

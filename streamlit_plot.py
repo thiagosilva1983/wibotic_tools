@@ -1,6 +1,7 @@
 # Rev J - shipment serials + customer PO for Nabtesco shipments
 import io
 import base64
+import json
 import re
 import math
 import tarfile
@@ -2495,7 +2496,7 @@ def weekly_gsheet_backend_name() -> str:
     return 'Google Sheets' if weekly_gsheet_configured() else 'Local JSON'
 
 
-def weekly_gsheet_get_worksheet():
+def weekly_gsheet_get_spreadsheet():
     if not weekly_gsheet_configured():
         raise RuntimeError('Google Sheets is not configured.')
     scopes = [
@@ -2504,8 +2505,20 @@ def weekly_gsheet_get_worksheet():
     ]
     credentials = Credentials.from_service_account_info(dict(st.secrets['gcp_service_account']), scopes=scopes)
     gc = gspread.authorize(credentials)
-    sh = gc.open_by_key(st.secrets['google_sheet']['spreadsheet_id'])
+    return gc.open_by_key(st.secrets['google_sheet']['spreadsheet_id'])
+
+
+def weekly_gsheet_get_worksheet():
+    sh = weekly_gsheet_get_spreadsheet()
     return sh.worksheet(st.secrets['google_sheet']['worksheet_name'])
+
+
+def weekly_gsheet_get_or_create_worksheet(title: str, rows: int = 1000, cols: int = 20):
+    sh = weekly_gsheet_get_spreadsheet()
+    try:
+        return sh.worksheet(title)
+    except Exception:
+        return sh.add_worksheet(title=title, rows=rows, cols=cols)
 
 
 def weekly_prod_load_state_local() -> Dict[str, Any]:
@@ -2594,10 +2607,134 @@ def weekly_prod_save_state(state: Dict[str, Any]) -> None:
             ws.clear()
             values = [headers] + [[row.get(h, '') for h in headers] for row in rows]
             ws.update(values)
+            board_df = st.session_state.get('weekly_prod_df') if 'weekly_prod_df' in st.session_state else None
+            if board_df is not None:
+                weekly_gsheet_write_pretty_view(board_df)
         except Exception:
             pass
     p = weekly_prod_state_path()
     p.write_text(json.dumps(clean, indent=2), encoding='utf-8')
+
+
+
+def weekly_gsheet_write_pretty_view(board_df: pd.DataFrame) -> None:
+    if not weekly_gsheet_configured():
+        return
+    board_df = weekly_production_normalize_df(board_df)
+    ws = weekly_gsheet_get_or_create_worksheet('weekly_view', rows=max(1000, len(board_df) + 100), cols=12)
+    rows = [[
+        'Customer', 'Product Type', 'Product', 'SO Number',
+        'QTY Ordered', 'QTY Shipped', 'QTY Remaining', 'Date Shipped',
+        'Tracking Number', 'Notes'
+    ]]
+    merge_ranges = []
+    current_row = 2
+    for so, block in board_df.groupby('SO Number', sort=False):
+        if not str(so or '').strip():
+            continue
+        first = block.iloc[0]
+        rows.append([
+            first.get('Customer', ''),
+            '',
+            '',
+            so,
+            '',
+            '',
+            '',
+            '',
+            '',
+            first.get('Notes', ''),
+        ])
+        start_row = current_row
+        current_row += 1
+        for _, row in block.iterrows():
+            rows.append([
+                '',
+                '',
+                row.get('Product', ''),
+                '',
+                int(pd.to_numeric(row.get('QTY Ordered', 0), errors='coerce') or 0),
+                int(pd.to_numeric(row.get('QTY Shipped', 0), errors='coerce') or 0),
+                int(pd.to_numeric(row.get('QTY Remaining', 0), errors='coerce') or 0),
+                row.get('Date Shipped', ''),
+                row.get('Tracking Number', ''),
+                row.get('Notes', ''),
+            ])
+            current_row += 1
+        end_row = current_row - 1
+        if end_row > start_row:
+            merge_ranges.extend([
+                {'startRowIndex': start_row, 'endRowIndex': end_row + 1, 'startColumnIndex': 0, 'endColumnIndex': 1},
+                {'startRowIndex': start_row, 'endRowIndex': end_row + 1, 'startColumnIndex': 1, 'endColumnIndex': 2},
+                {'startRowIndex': start_row, 'endRowIndex': end_row + 1, 'startColumnIndex': 3, 'endColumnIndex': 4},
+            ])
+        rows.append([''] * 10)
+        current_row += 1
+
+    ws.clear()
+    ws.update('A1:J{}'.format(len(rows)), rows)
+
+    sheet_id = ws.id
+    requests_body = []
+    # basic formatting
+    requests_body.append({
+        'repeatCell': {
+            'range': {'sheetId': sheet_id, 'startRowIndex': 0, 'endRowIndex': 1, 'startColumnIndex': 0, 'endColumnIndex': 10},
+            'cell': {
+                'userEnteredFormat': {
+                    'backgroundColor': {'red': 0.64, 'green': 0.29, 'blue': 0.47},
+                    'textFormat': {'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}, 'bold': True},
+                    'horizontalAlignment': 'CENTER'
+                }
+            },
+            'fields': 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)'
+        }
+    })
+    # detect group header rows (customer + so number only)
+    for idx, row in enumerate(rows[1:], start=1):
+        is_group = bool((row[0] or row[3]) and not row[2] and not row[4] and not row[5] and not row[6])
+        if is_group:
+            requests_body.append({
+                'repeatCell': {
+                    'range': {'sheetId': sheet_id, 'startRowIndex': idx, 'endRowIndex': idx + 1, 'startColumnIndex': 0, 'endColumnIndex': 10},
+                    'cell': {
+                        'userEnteredFormat': {
+                            'backgroundColor': {'red': 0.93, 'green': 0.80, 'blue': 0.38},
+                            'textFormat': {'bold': True}
+                        }
+                    },
+                    'fields': 'userEnteredFormat(backgroundColor,textFormat)'
+                }
+            })
+        elif row[2]:
+            try:
+                ordered = int(row[4] or 0)
+                shipped = int(row[5] or 0)
+                remaining = int(row[6] or 0)
+            except Exception:
+                ordered = shipped = remaining = 0
+            if ordered > 0 and (remaining <= 0 or shipped >= ordered):
+                requests_body.append({
+                    'repeatCell': {
+                        'range': {'sheetId': sheet_id, 'startRowIndex': idx, 'endRowIndex': idx + 1, 'startColumnIndex': 0, 'endColumnIndex': 10},
+                        'cell': {
+                            'userEnteredFormat': {
+                                'backgroundColor': {'red': 0.55, 'green': 0.86, 'blue': 0.55}
+                            }
+                        },
+                        'fields': 'userEnteredFormat(backgroundColor)'
+                    }
+                })
+    for mr in merge_ranges:
+        requests_body.append({'mergeCells': {'range': {'sheetId': sheet_id, **mr}, 'mergeType': 'MERGE_ALL'}})
+    requests_body.extend([
+        {'updateSheetProperties': {'properties': {'sheetId': sheet_id, 'gridProperties': {'frozenRowCount': 1}}, 'fields': 'gridProperties.frozenRowCount'}},
+        {'autoResizeDimensions': {'dimensions': {'sheetId': sheet_id, 'dimension': 'COLUMNS', 'startIndex': 0, 'endIndex': 10}}},
+    ])
+    try:
+        weekly_gsheet_get_spreadsheet().batch_update({'requests': requests_body})
+    except Exception:
+        pass
 
 
 def weekly_prod_row_key(so_number: Any, product: Any) -> str:
@@ -3217,6 +3354,11 @@ def render_weekly_production_workspace():
                         progress_ph.info('Updating weekly board...')
                         st.session_state['weekly_prod_df'] = live_board
                         st.session_state['weekly_shipped_week_df'] = shipped_this_week
+                        if weekly_gsheet_configured():
+                            try:
+                                weekly_gsheet_write_pretty_view(live_board)
+                            except Exception:
+                                pass
                         weekly_save_priority_state_from_board(live_board)
                         stamp = pd.Timestamp.now().strftime('%Y-%m-%d %I:%M:%S %p')
                         st.session_state['weekly_last_refreshed_text'] = stamp
@@ -3241,6 +3383,11 @@ def render_weekly_production_workspace():
         st.session_state['weekly_refresh_status'] = 'Weekly board cleared.'
         st.session_state['weekly_refresh_error'] = ''
         weekly_prod_save_state(weekly_prod_state_default())
+        if weekly_gsheet_configured():
+            try:
+                weekly_gsheet_write_pretty_view(weekly_production_empty_df())
+            except Exception:
+                pass
         st.rerun()
 
     info_cols = st.columns([1.2, 2.4])

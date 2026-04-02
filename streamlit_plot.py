@@ -2521,6 +2521,103 @@ def weekly_gsheet_get_or_create_worksheet(title: str, rows: int = 1000, cols: in
         return sh.add_worksheet(title=title, rows=rows, cols=cols)
 
 
+
+
+def weekly_gsheet_backend_headers() -> list[str]:
+    return [
+        'so_number','product','priority','customer','product_type','notes','status','assigned_to','blocker',
+        'last_updated_by','last_updated_at','qty_ordered','qty_shipped','qty_invoiced','qty_remaining',
+        'date_shipped','tracking_number'
+    ]
+
+
+def weekly_gsheet_save_backend_board(board_df: pd.DataFrame) -> None:
+    if not weekly_gsheet_configured():
+        return
+    board_df = weekly_production_normalize_df(board_df)
+    ws = weekly_gsheet_get_worksheet()
+    headers = weekly_gsheet_backend_headers()
+    rows = []
+    for _, row in board_df.iterrows():
+        rows.append({
+            'so_number': str(row.get('SO Number', '') or ''),
+            'product': str(row.get('Product', '') or ''),
+            'priority': int(pd.to_numeric(row.get('Priority', 0), errors='coerce') or 0),
+            'customer': str(row.get('Customer', '') or ''),
+            'product_type': str(row.get('Product Type', '') or ''),
+            'notes': str(row.get('Notes', '') or ''),
+            'status': str(row.get('Status', '') or ''),
+            'assigned_to': str(row.get('Assigned To', '') or ''),
+            'blocker': str(row.get('Blocker', '') or ''),
+            'last_updated_by': str(row.get('Updated By', '') or ''),
+            'last_updated_at': str(row.get('Last Updated At', '') or ''),
+            'qty_ordered': int(pd.to_numeric(row.get('QTY Ordered', 0), errors='coerce') or 0),
+            'qty_shipped': int(pd.to_numeric(row.get('QTY Shipped', 0), errors='coerce') or 0),
+            'qty_invoiced': int(pd.to_numeric(row.get('QTY Invoiced', 0), errors='coerce') or 0),
+            'qty_remaining': int(pd.to_numeric(row.get('QTY Remaining', 0), errors='coerce') or 0),
+            'date_shipped': str(row.get('Date Shipped', '') or ''),
+            'tracking_number': str(row.get('Tracking Number', '') or ''),
+        })
+    ws.clear()
+    values = [headers] + [[r.get(h, '') for h in headers] for r in rows]
+    ws.update(values)
+
+
+def weekly_gsheet_load_backend_board() -> pd.DataFrame:
+    if not weekly_gsheet_configured():
+        return weekly_production_empty_df()
+    try:
+        ws = weekly_gsheet_get_worksheet()
+        rows = ws.get_all_records() or []
+    except Exception:
+        return weekly_production_empty_df()
+    if not rows:
+        return weekly_production_empty_df()
+    df = pd.DataFrame(rows)
+    lower = {c.lower(): c for c in df.columns}
+    required = {'so_number', 'product'}
+    if not required.issubset(set(lower.keys())):
+        return weekly_production_empty_df()
+    def g(name):
+        return lower.get(name, '')
+    out = pd.DataFrame({
+        'SO Number': df[g('so_number')].fillna('').astype(str) if g('so_number') else '',
+        'Product': df[g('product')].fillna('').astype(str) if g('product') else '',
+        'Priority': pd.to_numeric(df[g('priority')], errors='coerce').fillna(0).astype(int) if g('priority') else 0,
+        'Customer': df[g('customer')].fillna('').astype(str) if g('customer') else '',
+        'Product Type': df[g('product_type')].fillna('').astype(str) if g('product_type') else '',
+        'Notes': df[g('notes')].fillna('').astype(str) if g('notes') else '',
+        'Status': df[g('status')].fillna('').astype(str) if g('status') else '',
+        'Assigned To': df[g('assigned_to')].fillna('').astype(str) if g('assigned_to') else '',
+        'Blocker': df[g('blocker')].fillna('').astype(str) if g('blocker') else '',
+        'Updated By': df[g('last_updated_by')].fillna('').astype(str) if g('last_updated_by') else '',
+        'Last Updated At': df[g('last_updated_at')].fillna('').astype(str) if g('last_updated_at') else '',
+        'QTY Ordered': pd.to_numeric(df[g('qty_ordered')], errors='coerce').fillna(0).astype(int) if g('qty_ordered') else 0,
+        'QTY Shipped': pd.to_numeric(df[g('qty_shipped')], errors='coerce').fillna(0).astype(int) if g('qty_shipped') else 0,
+        'QTY Invoiced': pd.to_numeric(df[g('qty_invoiced')], errors='coerce').fillna(0).astype(int) if g('qty_invoiced') else 0,
+        'QTY Remaining': pd.to_numeric(df[g('qty_remaining')], errors='coerce').fillna(0).astype(int) if g('qty_remaining') else 0,
+        'Date Shipped': df[g('date_shipped')].fillna('').astype(str) if g('date_shipped') else '',
+        'Tracking Number': df[g('tracking_number')].fillna('').astype(str) if g('tracking_number') else '',
+    })
+    out = weekly_production_normalize_df(out)
+    # Drop old closed/completed sales orders that are not shipped this week.
+    if not out.empty:
+        so_keep = []
+        for so, block in out.groupby('SO Number', sort=False):
+            remaining = pd.to_numeric(block['QTY Remaining'], errors='coerce').fillna(0)
+            if (remaining > 0).any() or block.apply(weekly_is_row_shipped_this_week, axis=1).any():
+                so_keep.append(so)
+        out = out[out['SO Number'].isin(so_keep)].reset_index(drop=True)
+    return out
+
+
+def weekly_product_display(item_obj: Dict[str, Any], line_obj: Dict[str, Any]) -> str:
+    part = _weekly_text(item_obj.get('name'), line_obj.get('itemName'), line_obj.get('name'))
+    desc = _weekly_text(item_obj.get('fullname'), line_obj.get('description'), line_obj.get('itemDescription'))
+    if desc and desc != part:
+        return f"{part}, {desc}" if part else desc
+    return part or desc
+
 def weekly_prod_load_state_local() -> Dict[str, Any]:
     p = weekly_prod_state_path()
     if not p.exists():
@@ -2548,6 +2645,14 @@ def weekly_prod_load_state_local() -> Dict[str, Any]:
 
 
 def weekly_prod_load_state() -> Dict[str, Any]:
+    backend_board = weekly_gsheet_load_backend_board() if weekly_gsheet_configured() else weekly_production_empty_df()
+    if not backend_board.empty:
+        state = weekly_prod_state_default()
+        state['backend'] = 'Google Sheets'
+        ordered = list(dict.fromkeys(backend_board['SO Number'].astype(str).tolist()))
+        state['priority_order'] = ordered
+        state['so_overrides'] = weekly_prod_build_so_overrides(backend_board)
+        return state
     if weekly_gsheet_configured():
         try:
             ws = weekly_gsheet_get_worksheet()
@@ -2587,29 +2692,9 @@ def weekly_prod_save_state(state: Dict[str, Any]) -> None:
     clean['backend'] = weekly_gsheet_backend_name()
     if weekly_gsheet_configured():
         try:
-            ws = weekly_gsheet_get_worksheet()
-            rows = []
-            ordered = weekly_sort_so_numbers(list((clean.get('so_overrides') or {}).keys()), clean.get('priority_order') or [])
-            for idx, so in enumerate(ordered, start=1):
-                ov = (clean.get('so_overrides') or {}).get(so, {}) or {}
-                rows.append({
-                    'so_number': so,
-                    'priority': int(ov.get('Priority') or idx),
-                    'customer': str(ov.get('Customer', '') or ''),
-                    'status': str(ov.get('Status', '') or ''),
-                    'assigned_to': str(ov.get('Assigned To', '') or ''),
-                    'blocker': str(ov.get('Blocker', '') or ''),
-                    'notes': str(ov.get('Notes', '') or ''),
-                    'last_updated_by': str(ov.get('Updated By', '') or ''),
-                    'last_updated_at': str(ov.get('Last Updated At', '') or ''),
-                })
-            headers = ['so_number', 'priority', 'customer', 'status', 'assigned_to', 'blocker', 'notes', 'last_updated_by', 'last_updated_at']
-            ws.clear()
-            values = [headers] + [[row.get(h, '') for h in headers] for row in rows]
-            ws.update(values)
-            board_df = st.session_state.get('weekly_prod_df') if 'weekly_prod_df' in st.session_state else None
-            if board_df is not None:
-                weekly_gsheet_write_pretty_view(board_df)
+            board_df = st.session_state.get('weekly_prod_df') if 'weekly_prod_df' in st.session_state else weekly_production_empty_df()
+            weekly_gsheet_save_backend_board(board_df)
+            weekly_gsheet_write_pretty_view(board_df)
         except Exception:
             pass
     p = weekly_prod_state_path()
@@ -2918,44 +3003,6 @@ def weekly_is_row_shipped_this_week(row: pd.Series) -> bool:
     return remaining <= 0
 
 
-def weekly_block_is_recently_complete(block: pd.DataFrame, recent_days: int = 21) -> bool:
-    """True when a whole SO block is fully shipped and its latest ship date is within the recent window."""
-    if block is None or block.empty:
-        return False
-    remaining = pd.to_numeric(block.get('QTY Remaining'), errors='coerce').fillna(0)
-    shipped = pd.to_numeric(block.get('QTY Shipped'), errors='coerce').fillna(0)
-    if not ((remaining <= 0).all() and (shipped > 0).any()):
-        return False
-    latest = None
-    for value in block.get('Date Shipped', pd.Series(dtype=object)).tolist():
-        for ts in weekly_dates_from_text(value):
-            if latest is None or ts > latest:
-                latest = ts
-    if latest is None:
-        return False
-    try:
-        now = pd.Timestamp.now(tz=latest.tzinfo) if getattr(latest, 'tzinfo', None) else pd.Timestamp.now()
-    except Exception:
-        now = pd.Timestamp.now()
-    return latest >= (now - pd.Timedelta(days=recent_days))
-
-
-def weekly_filter_active_open_board(board_df: pd.DataFrame, recent_complete_days: int = 21) -> pd.DataFrame:
-    """Keep open/partial SOs and only very recent fully shipped SOs."""
-    board_df = weekly_production_normalize_df(board_df)
-    if board_df.empty or 'SO Number' not in board_df.columns:
-        return board_df
-    keep_blocks = []
-    for _, block in board_df.groupby('SO Number', sort=False):
-        remaining = pd.to_numeric(block.get('QTY Remaining'), errors='coerce').fillna(0)
-        if (remaining > 0).any() or weekly_block_is_recently_complete(block, recent_days=recent_complete_days):
-            keep_blocks.append(block)
-    if not keep_blocks:
-        return weekly_production_empty_df()
-    out = pd.concat(keep_blocks, ignore_index=True)
-    return weekly_production_normalize_df(out)
-
-
 def weekly_sort_so_numbers(sales_orders: List[str], priority_order: List[str]) -> List[str]:
     seen = set()
     ordered = []
@@ -3081,7 +3128,7 @@ def weekly_production_rows_from_sales_order(client: SOSReadonlyClient, so_number
     line_has_shipped_qty = False
     for ln in lines:
         item_obj = ln.get('item') or {}
-        product = _weekly_text(item_obj.get('name'), item_obj.get('fullname'), ln.get('itemName'), ln.get('name'), ln.get('description'))
+        product = weekly_product_display(item_obj, ln)
         if not product:
             continue
         raw_shipped = ln.get('quantityShipped')
@@ -3128,7 +3175,7 @@ def weekly_production_rows_from_sales_order(client: SOSReadonlyClient, so_number
             sh_lines = client.extract_shipment_lines(sh_detail)
             for sh_line in sh_lines:
                 item_obj = sh_line.get('item') or {}
-                key = _weekly_text(item_obj.get('name'), item_obj.get('fullname'), sh_line.get('itemName'), sh_line.get('name'))
+                key = weekly_product_display(item_obj, sh_line)
                 if not key:
                     key = _weekly_text(sh_line.get('description'), sh_line.get('itemDescription'))
                 if not key:
@@ -3148,7 +3195,7 @@ def weekly_production_rows_from_sales_order(client: SOSReadonlyClient, so_number
     all_tracking = ', '.join(sorted(set(tracking_map.get('__all__', []))))
     for ln in lines:
         item_obj = ln.get('item') or {}
-        product = _weekly_text(item_obj.get('name'), item_obj.get('fullname'), ln.get('itemName'), ln.get('name'), ln.get('description'))
+        product = weekly_product_display(item_obj, ln)
         if not product:
             continue
         product_type = _weekly_text(item_obj.get('type'), ln.get('type'), ln.get('itemType'))
@@ -3226,7 +3273,7 @@ def weekly_production_rows_from_sales_order_summary(client: SOSReadonlyClient, s
     line_has_shipped_qty = False
     for ln in lines:
         item_obj = ln.get('item') or {}
-        product = _weekly_text(item_obj.get('name'), item_obj.get('fullname'), ln.get('itemName'), ln.get('name'), ln.get('description'))
+        product = weekly_product_display(item_obj, ln)
         if not product:
             continue
         raw_shipped = ln.get('quantityShipped')
@@ -3273,7 +3320,7 @@ def weekly_production_rows_from_sales_order_summary(client: SOSReadonlyClient, s
             sh_lines = client.extract_shipment_lines(sh_detail)
             for sh_line in sh_lines:
                 item_obj = sh_line.get('item') or {}
-                key = _weekly_text(item_obj.get('name'), item_obj.get('fullname'), sh_line.get('itemName'), sh_line.get('name'))
+                key = weekly_product_display(item_obj, sh_line)
                 if not key:
                     key = _weekly_text(sh_line.get('description'), sh_line.get('itemDescription'))
                 if not key:
@@ -3293,7 +3340,7 @@ def weekly_production_rows_from_sales_order_summary(client: SOSReadonlyClient, s
     all_tracking = ', '.join(sorted(set(tracking_map.get('__all__', []))))
     for ln in lines:
         item_obj = ln.get('item') or {}
-        product = _weekly_text(item_obj.get('name'), item_obj.get('fullname'), ln.get('itemName'), ln.get('name'), ln.get('description'))
+        product = weekly_product_display(item_obj, ln)
         if not product:
             continue
         product_type = _weekly_text(item_obj.get('type'), ln.get('type'), ln.get('itemType'))
@@ -3401,7 +3448,6 @@ def weekly_refresh_from_open_sales_orders(
             msg += f' Skipped {len(failures)}.'
         progress_callback(msg)
     merged_live = weekly_merge_live_board_with_state(live_df, state)
-    merged_live = weekly_filter_active_open_board(merged_live, recent_complete_days=21)
     shipped_this_week_df = weekly_build_shipped_this_week_df(existing_board, open_sos)
     return merged_live, shipped_this_week_df, open_sos
 
@@ -3473,9 +3519,12 @@ def weekly_render_display_table(board_df: pd.DataFrame, title: str, force_green:
         styles = []
         is_header = row.get('_row_kind') == 'header'
         is_green = force_green or bool(row.get('_shipped_week'))
+        header_complete = bool(row.get('_header_complete'))
         for c in row.index:
             if c in {'_row_kind', '_shipped_week', '_header_complete'}:
                 styles.append('')
+            elif is_header and header_complete:
+                styles.append('background-color: #b7e1cd; font-weight: 700;')
             elif is_header:
                 styles.append('background-color: #f4d36b; font-weight: 700;')
             elif is_green:
@@ -3578,6 +3627,12 @@ def render_weekly_production_workspace():
 
     st.session_state['weekly_prod_df'] = weekly_production_normalize_df(st.session_state.get('weekly_prod_df'))
     st.session_state['weekly_shipped_week_df'] = weekly_production_normalize_df(st.session_state.get('weekly_shipped_week_df'))
+
+    if st.session_state['weekly_prod_df'].empty and weekly_gsheet_configured():
+        loaded_board = weekly_gsheet_load_backend_board()
+        if not loaded_board.empty:
+            st.session_state['weekly_prod_df'] = loaded_board
+            st.session_state['weekly_refresh_status'] = 'Loaded saved weekly board from Google Sheets.'
 
     saved_state = weekly_prod_load_state()
     if st.session_state['weekly_prod_df'].empty and saved_state.get('priority_order'):

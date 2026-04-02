@@ -2934,6 +2934,12 @@ def render_weekly_production_workspace():
         st.session_state['weekly_prod_df'] = weekly_production_empty_df()
     if 'weekly_shipped_week_df' not in st.session_state:
         st.session_state['weekly_shipped_week_df'] = weekly_production_empty_df()
+    if 'weekly_last_refreshed_text' not in st.session_state:
+        st.session_state['weekly_last_refreshed_text'] = ''
+    if 'weekly_refresh_status' not in st.session_state:
+        st.session_state['weekly_refresh_status'] = ''
+    if 'weekly_refresh_error' not in st.session_state:
+        st.session_state['weekly_refresh_error'] = ''
 
     st.session_state['weekly_prod_df'] = weekly_production_normalize_df(st.session_state.get('weekly_prod_df'))
     st.session_state['weekly_shipped_week_df'] = weekly_production_normalize_df(st.session_state.get('weekly_shipped_week_df'))
@@ -2952,29 +2958,62 @@ def render_weekly_production_workspace():
                 st.markdown(f'[Connect to SOS]({auth_url})')
 
     ctl1, ctl2, ctl3 = st.columns([1.4, 1.1, 1.1])
-    if ctl1.button('Refresh open sales orders', key='weekly_refresh_open', use_container_width=True):
+    refresh_feedback = st.container()
+    refresh_clicked = ctl1.button('Refresh open sales orders', key='weekly_refresh_open', use_container_width=True)
+    if refresh_clicked:
+        st.session_state['weekly_refresh_status'] = ''
+        st.session_state['weekly_refresh_error'] = ''
         if client is None:
-            st.error('SOS is not connected yet.')
+            st.session_state['weekly_refresh_error'] = 'SOS is not connected yet.'
         else:
-            try:
-                live_board, shipped_this_week, open_sos = weekly_refresh_from_open_sales_orders(
-                    client,
-                    st.session_state['weekly_prod_df'],
-                )
-                st.session_state['weekly_prod_df'] = live_board
-                st.session_state['weekly_shipped_week_df'] = shipped_this_week
-                weekly_save_priority_state_from_board(live_board)
-                st.success(f"Loaded {len(open_sos)} open sales order(s). Shipped-this-week board keeps closed orders shipped this week until Monday.")
-            except Exception as exc:
-                st.error(f'Could not refresh open sales orders: {exc}')
+            with refresh_feedback:
+                with st.status('Refreshing Weekly Production board...', expanded=True) as status_box:
+                    try:
+                        st.write('Connecting to SOS...')
+                        st.write('Loading current open sales orders...')
+                        live_board, shipped_this_week, open_sos = weekly_refresh_from_open_sales_orders(
+                            client,
+                            st.session_state['weekly_prod_df'],
+                        )
+                        st.write('Merging saved priority and notes...')
+                        st.session_state['weekly_prod_df'] = live_board
+                        st.session_state['weekly_shipped_week_df'] = shipped_this_week
+                        weekly_save_priority_state_from_board(live_board)
+                        stamp = pd.Timestamp.now().strftime('%Y-%m-%d %I:%M:%S %p')
+                        st.session_state['weekly_last_refreshed_text'] = stamp
+                        st.session_state['weekly_refresh_status'] = (
+                            f"Loaded {len(open_sos)} open sales order(s). "
+                            f"Shipped This Week contains {len(shipped_this_week)} row(s)."
+                        )
+                        status_box.update(label='Weekly Production refresh complete', state='complete', expanded=False)
+                        st.write('Updating weekly board... done.')
+                    except Exception as exc:
+                        st.session_state['weekly_refresh_error'] = f'Could not refresh open sales orders: {exc}'
+                        status_box.update(label='Weekly Production refresh failed', state='error', expanded=True)
     if ctl2.button('Save priority + notes', key='weekly_save_state_btn', use_container_width=True):
         weekly_save_priority_state_from_board(st.session_state['weekly_prod_df'])
-        st.success('Weekly Production priority and notes saved.')
+        st.session_state['weekly_refresh_error'] = ''
+        st.session_state['weekly_refresh_status'] = 'Weekly Production priority and notes saved.'
     if ctl3.button('Clear weekly board', key='weekly_clear_board', use_container_width=True):
         st.session_state['weekly_prod_df'] = weekly_production_empty_df()
         st.session_state['weekly_shipped_week_df'] = weekly_production_empty_df()
+        st.session_state['weekly_last_refreshed_text'] = ''
+        st.session_state['weekly_refresh_status'] = 'Weekly board cleared.'
+        st.session_state['weekly_refresh_error'] = ''
         weekly_prod_save_state(weekly_prod_state_default())
         st.rerun()
+
+    info_cols = st.columns([1.2, 2.4])
+    with info_cols[0]:
+        last_refreshed = st.session_state.get('weekly_last_refreshed_text', '').strip()
+        st.caption(f"Last refreshed: {last_refreshed if last_refreshed else 'Not yet refreshed'}")
+    with info_cols[1]:
+        refresh_status = st.session_state.get('weekly_refresh_status', '').strip()
+        refresh_error = st.session_state.get('weekly_refresh_error', '').strip()
+        if refresh_error:
+            st.error(refresh_error)
+        elif refresh_status:
+            st.success(refresh_status)
 
     with st.expander('Optional manual add / load', expanded=False):
         left, right = st.columns([1.3, 1.7])

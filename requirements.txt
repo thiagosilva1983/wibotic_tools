@@ -6,3 +6,5 @@ plotly
 pillow
 reportlab
 requests
+gspread
+google-auth

@@ -2413,6 +2413,47 @@ def weekly_production_empty_df() -> pd.DataFrame:
         'Tracking Number', 'Status', 'Assigned To', 'Blocker', 'Notes', 'Updated By', 'Last Updated At'
     ])
 
+def weekly_production_normalize_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    base = weekly_production_empty_df()
+    if df is None:
+        return base.copy()
+    try:
+        work = pd.DataFrame(df).copy()
+    except Exception:
+        return base.copy()
+    if work.empty:
+        return base.copy()
+
+    for col in base.columns:
+        if col not in work.columns:
+            work[col] = ''
+
+    work = work[base.columns.tolist()].copy()
+
+    for col in ['Priority', 'QTY Ordered', 'QTY Shipped', 'QTY Invoiced', 'QTY Remaining']:
+        work[col] = pd.to_numeric(work[col], errors='coerce').fillna(0).astype(int)
+
+    text_cols = [
+        'Customer', 'Product Type', 'Product', 'SO Number', 'Date Shipped',
+        'Tracking Number', 'Status', 'Assigned To', 'Blocker', 'Notes',
+        'Updated By', 'Last Updated At'
+    ]
+    for col in text_cols:
+        work[col] = work[col].fillna('').astype(str)
+
+    work['SO Number'] = work['SO Number'].str.strip()
+    work['Product'] = work['Product'].str.strip()
+    work['Customer'] = work['Customer'].str.strip()
+    work['Status'] = work['Status'].str.strip()
+    work['Assigned To'] = work['Assigned To'].str.strip()
+    work['Blocker'] = work['Blocker'].str.strip()
+    work['Notes'] = work['Notes'].str.strip()
+    work['Updated By'] = work['Updated By'].str.strip()
+    work['Last Updated At'] = work['Last Updated At'].str.strip()
+
+    work = work.drop_duplicates(subset=['SO Number', 'Product', 'Date Shipped', 'Tracking Number', 'Notes'], keep='first').reset_index(drop=True)
+    return work
+
 
 def weekly_prod_state_default() -> Dict[str, Any]:
     return {

@@ -2918,6 +2918,44 @@ def weekly_is_row_shipped_this_week(row: pd.Series) -> bool:
     return remaining <= 0
 
 
+def weekly_block_is_recently_complete(block: pd.DataFrame, recent_days: int = 21) -> bool:
+    """True when a whole SO block is fully shipped and its latest ship date is within the recent window."""
+    if block is None or block.empty:
+        return False
+    remaining = pd.to_numeric(block.get('QTY Remaining'), errors='coerce').fillna(0)
+    shipped = pd.to_numeric(block.get('QTY Shipped'), errors='coerce').fillna(0)
+    if not ((remaining <= 0).all() and (shipped > 0).any()):
+        return False
+    latest = None
+    for value in block.get('Date Shipped', pd.Series(dtype=object)).tolist():
+        for ts in weekly_dates_from_text(value):
+            if latest is None or ts > latest:
+                latest = ts
+    if latest is None:
+        return False
+    try:
+        now = pd.Timestamp.now(tz=latest.tzinfo) if getattr(latest, 'tzinfo', None) else pd.Timestamp.now()
+    except Exception:
+        now = pd.Timestamp.now()
+    return latest >= (now - pd.Timedelta(days=recent_days))
+
+
+def weekly_filter_active_open_board(board_df: pd.DataFrame, recent_complete_days: int = 21) -> pd.DataFrame:
+    """Keep open/partial SOs and only very recent fully shipped SOs."""
+    board_df = weekly_production_normalize_df(board_df)
+    if board_df.empty or 'SO Number' not in board_df.columns:
+        return board_df
+    keep_blocks = []
+    for _, block in board_df.groupby('SO Number', sort=False):
+        remaining = pd.to_numeric(block.get('QTY Remaining'), errors='coerce').fillna(0)
+        if (remaining > 0).any() or weekly_block_is_recently_complete(block, recent_days=recent_complete_days):
+            keep_blocks.append(block)
+    if not keep_blocks:
+        return weekly_production_empty_df()
+    out = pd.concat(keep_blocks, ignore_index=True)
+    return weekly_production_normalize_df(out)
+
+
 def weekly_sort_so_numbers(sales_orders: List[str], priority_order: List[str]) -> List[str]:
     seen = set()
     ordered = []
@@ -3363,6 +3401,7 @@ def weekly_refresh_from_open_sales_orders(
             msg += f' Skipped {len(failures)}.'
         progress_callback(msg)
     merged_live = weekly_merge_live_board_with_state(live_df, state)
+    merged_live = weekly_filter_active_open_board(merged_live, recent_complete_days=21)
     shipped_this_week_df = weekly_build_shipped_this_week_df(existing_board, open_sos)
     return merged_live, shipped_this_week_df, open_sos
 
@@ -3434,12 +3473,9 @@ def weekly_render_display_table(board_df: pd.DataFrame, title: str, force_green:
         styles = []
         is_header = row.get('_row_kind') == 'header'
         is_green = force_green or bool(row.get('_shipped_week'))
-        header_complete = bool(row.get('_header_complete'))
         for c in row.index:
             if c in {'_row_kind', '_shipped_week', '_header_complete'}:
                 styles.append('')
-            elif is_header and header_complete:
-                styles.append('background-color: #b7e1cd; font-weight: 700;')
             elif is_header:
                 styles.append('background-color: #f4d36b; font-weight: 700;')
             elif is_green:

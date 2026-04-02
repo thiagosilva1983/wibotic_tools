@@ -23,6 +23,14 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 import requests
+import json
+
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+except Exception:
+    gspread = None
+    Credentials = None
 
 st.set_page_config(page_title='Derated + Arduino + Plot', layout='wide')
 
@@ -2395,13 +2403,19 @@ SOS_REDIRECT_URI="https://your-app.streamlit.app/""" , language='toml')
 
 
 WEEKLY_PROD_STATE_FILE = Path(__file__).with_name('weekly_production_state.json')
+WEEKLY_GSHEET_HEADERS = [
+    "so_number", "product", "priority", "customer", "product_type",
+    "notes", "status", "assigned_to", "blocker",
+    "last_updated_by", "last_updated_at"
+]
 
 
 def weekly_production_empty_df() -> pd.DataFrame:
     return pd.DataFrame(columns=[
         'Priority', 'Customer', 'Product Type', 'Product', 'SO Number',
-        'QTY Ordered', 'QTY Shipped', 'QTY Remaining', 'Date Shipped',
-        'Tracking Number', 'Notes'
+        'QTY Ordered', 'QTY Shipped', 'QTY Invoiced', 'QTY Remaining', 'Date Shipped',
+        'Tracking Number', 'Status', 'Assigned To', 'Blocker', 'Notes',
+        'Last Updated By', 'Last Updated At'
     ])
 
 
@@ -2410,6 +2424,7 @@ def weekly_prod_state_default() -> Dict[str, Any]:
         'priority_order': [],
         'row_overrides': {},
         'last_refresh_iso': '',
+        'storage': 'local_json',
     }
 
 
@@ -2417,7 +2432,115 @@ def weekly_prod_state_path() -> Path:
     return WEEKLY_PROD_STATE_FILE
 
 
+def weekly_gsheet_is_configured() -> bool:
+    try:
+        return bool(gspread and Credentials and st.secrets.get('gcp_service_account') and st.secrets.get('google_sheet'))
+    except Exception:
+        return False
+
+
+@st.cache_resource(show_spinner=False)
+def weekly_gsheet_get_client():
+    creds = Credentials.from_service_account_info(
+        dict(st.secrets['gcp_service_account']),
+        scopes=[
+            'https://www.googleapis.com/auth/spreadsheets',
+            'https://www.googleapis.com/auth/drive',
+        ],
+    )
+    return gspread.authorize(creds)
+
+
+def weekly_gsheet_open_worksheet():
+    gc = weekly_gsheet_get_client()
+    sh = gc.open_by_key(st.secrets['google_sheet']['spreadsheet_id'])
+    return sh.worksheet(st.secrets['google_sheet']['worksheet_name'])
+
+
+def weekly_gsheet_read_rows() -> pd.DataFrame:
+    if not weekly_gsheet_is_configured():
+        return pd.DataFrame(columns=WEEKLY_GSHEET_HEADERS)
+    try:
+        ws = weekly_gsheet_open_worksheet()
+        rows = ws.get_all_records()
+        if not rows:
+            return pd.DataFrame(columns=WEEKLY_GSHEET_HEADERS)
+        df = pd.DataFrame(rows)
+        rename_map = {
+            'SO Number': 'so_number', 'Product': 'product', 'Priority': 'priority',
+            'Customer': 'customer', 'Product Type': 'product_type', 'Notes': 'notes',
+            'Status': 'status', 'Assigned To': 'assigned_to', 'Blocker': 'blocker',
+            'Last Updated By': 'last_updated_by', 'Last Updated At': 'last_updated_at',
+        }
+        df = df.rename(columns=rename_map)
+        for c in WEEKLY_GSHEET_HEADERS:
+            if c not in df.columns:
+                df[c] = ''
+        return df[WEEKLY_GSHEET_HEADERS].copy()
+    except Exception:
+        return pd.DataFrame(columns=WEEKLY_GSHEET_HEADERS)
+
+
+def weekly_gsheet_write_rows(rows_df: pd.DataFrame) -> None:
+    if not weekly_gsheet_is_configured():
+        return
+    ws = weekly_gsheet_open_worksheet()
+    safe = rows_df.copy() if rows_df is not None else pd.DataFrame(columns=WEEKLY_GSHEET_HEADERS)
+    for c in WEEKLY_GSHEET_HEADERS:
+        if c not in safe.columns:
+            safe[c] = ''
+    safe = safe[WEEKLY_GSHEET_HEADERS].fillna('')
+    values = [WEEKLY_GSHEET_HEADERS] + safe.astype(str).values.tolist()
+    ws.clear()
+    ws.update(values)
+
+
+def weekly_prod_rows_to_state(rows_df: pd.DataFrame) -> Dict[str, Any]:
+    state = weekly_prod_state_default()
+    if rows_df is None or rows_df.empty:
+        return state
+    work = rows_df.copy()
+    work['so_number'] = work['so_number'].fillna('').astype(str).str.strip()
+    work['product'] = work['product'].fillna('').astype(str)
+    work['priority'] = pd.to_numeric(work['priority'], errors='coerce').fillna(0).astype(int)
+    work = work[(work['so_number'] != '') & (work['product'] != '')].copy()
+    if work.empty:
+        return state
+    priority_df = work[['so_number', 'priority']].copy().sort_values(['priority', 'so_number'], kind='stable')
+    priority_order = []
+    seen = set()
+    for so in priority_df['so_number'].tolist():
+        if so and so not in seen:
+            priority_order.append(so)
+            seen.add(so)
+    overrides = {}
+    for _, row in work.iterrows():
+        key = weekly_prod_row_key(row.get('so_number'), row.get('product'))
+        overrides[key] = {
+            'Customer': str(row.get('customer', '') or ''),
+            'Product Type': str(row.get('product_type', '') or ''),
+            'Notes': str(row.get('notes', '') or ''),
+            'Status': str(row.get('status', '') or ''),
+            'Assigned To': str(row.get('assigned_to', '') or ''),
+            'Blocker': str(row.get('blocker', '') or ''),
+            'Last Updated By': str(row.get('last_updated_by', '') or ''),
+            'Last Updated At': str(row.get('last_updated_at', '') or ''),
+        }
+    state['priority_order'] = priority_order
+    state['row_overrides'] = overrides
+    state['storage'] = 'google_sheets'
+    times = [str(x) for x in work['last_updated_at'].tolist() if str(x or '').strip()]
+    if times:
+        state['last_refresh_iso'] = sorted(times)[-1]
+    return state
+
+
 def weekly_prod_load_state() -> Dict[str, Any]:
+    if weekly_gsheet_is_configured():
+        remote_rows = weekly_gsheet_read_rows()
+        remote_state = weekly_prod_rows_to_state(remote_rows)
+        if remote_state.get('priority_order') or remote_state.get('row_overrides'):
+            return remote_state
     p = weekly_prod_state_path()
     if not p.exists():
         return weekly_prod_state_default()
@@ -2443,6 +2566,42 @@ def weekly_prod_save_state(state: Dict[str, Any]) -> None:
     p.write_text(json.dumps(clean, indent=2), encoding='utf-8')
 
 
+def weekly_prod_save_board_to_backends(board_df: pd.DataFrame, actor: str = '') -> None:
+    board_df = weekly_production_normalize_df(board_df)
+    ordered_sos = list(dict.fromkeys(board_df['SO Number'].astype(str).tolist()))
+    state = weekly_prod_state_default()
+    state['priority_order'] = ordered_sos
+    state['row_overrides'] = weekly_prod_build_row_overrides(board_df)
+    state['last_refresh_iso'] = pd.Timestamp.now().isoformat()
+    state['storage'] = 'google_sheets' if weekly_gsheet_is_configured() else 'local_json'
+    weekly_prod_save_state(state)
+
+    if weekly_gsheet_is_configured():
+        ts = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
+        rows = []
+        for _, row in board_df.iterrows():
+            last_by = str(row.get('Last Updated By', '') or actor or '')
+            last_at = str(row.get('Last Updated At', '') or ts if last_by else row.get('Last Updated At', '') or '')
+            rows.append({
+                'so_number': str(row.get('SO Number', '') or ''),
+                'product': str(row.get('Product', '') or ''),
+                'priority': int(pd.to_numeric(row.get('Priority', 0), errors='coerce') or 0),
+                'customer': str(row.get('Customer', '') or ''),
+                'product_type': str(row.get('Product Type', '') or ''),
+                'notes': str(row.get('Notes', '') or ''),
+                'status': str(row.get('Status', '') or ''),
+                'assigned_to': str(row.get('Assigned To', '') or ''),
+                'blocker': str(row.get('Blocker', '') or ''),
+                'last_updated_by': last_by,
+                'last_updated_at': last_at,
+            })
+        weekly_gsheet_write_rows(pd.DataFrame(rows, columns=WEEKLY_GSHEET_HEADERS))
+
+
+def weekly_prod_clear_backends() -> None:
+    weekly_prod_save_state(weekly_prod_state_default())
+    if weekly_gsheet_is_configured():
+        weekly_gsheet_write_rows(pd.DataFrame(columns=WEEKLY_GSHEET_HEADERS))
 def weekly_prod_row_key(so_number: Any, product: Any) -> str:
     return f"{str(so_number or '').strip()}||{str(product or '').strip()}"
 
@@ -2460,6 +2619,11 @@ def weekly_prod_build_row_overrides(df: pd.DataFrame) -> Dict[str, Dict[str, Any
             'Notes': str(row.get('Notes', '') or ''),
             'Product Type': str(row.get('Product Type', '') or ''),
             'Customer': str(row.get('Customer', '') or ''),
+            'Status': str(row.get('Status', '') or ''),
+            'Assigned To': str(row.get('Assigned To', '') or ''),
+            'Blocker': str(row.get('Blocker', '') or ''),
+            'Last Updated By': str(row.get('Last Updated By', '') or ''),
+            'Last Updated At': str(row.get('Last Updated At', '') or ''),
         }
     return out
 
@@ -2471,7 +2635,7 @@ def weekly_prod_apply_row_overrides(df: pd.DataFrame, overrides: Dict[str, Dict[
     for idx, row in out.iterrows():
         key = weekly_prod_row_key(row.get('SO Number'), row.get('Product'))
         ov = (overrides or {}).get(key) or {}
-        for col in ['Notes', 'Product Type', 'Customer']:
+        for col in ['Notes', 'Product Type', 'Customer', 'Status', 'Assigned To', 'Blocker', 'Last Updated By', 'Last Updated At']:
             value = ov.get(col)
             if value not in [None, '']:
                 out.at[idx, col] = str(value)
@@ -2483,13 +2647,14 @@ def weekly_production_normalize_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     if df is None or len(df) == 0:
         return base.copy()
     out = df.copy()
+    num_cols = ['Priority', 'QTY Ordered', 'QTY Shipped', 'QTY Invoiced', 'QTY Remaining']
     for col in base.columns:
         if col not in out.columns:
-            out[col] = '' if col not in ['Priority', 'QTY Ordered', 'QTY Shipped', 'QTY Remaining'] else 0
+            out[col] = '' if col not in num_cols else 0
     out = out[base.columns].copy()
-    for col in ['Priority', 'QTY Ordered', 'QTY Shipped', 'QTY Remaining']:
+    for col in num_cols:
         out[col] = pd.to_numeric(out[col], errors='coerce').fillna(0).astype(int)
-    for col in ['SO Number', 'Customer', 'Product Type', 'Product', 'Date Shipped', 'Tracking Number', 'Notes']:
+    for col in [c for c in base.columns if c not in num_cols]:
         out[col] = out[col].fillna('').astype(str)
         out[col] = out[col].replace({'nan': '', 'None': ''})
     if out['Priority'].eq(0).all():
@@ -2505,7 +2670,7 @@ def weekly_production_normalize_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
 
 
 def weekly_production_reset_priorities(df: pd.DataFrame, priority_order: Optional[List[str]] = None) -> pd.DataFrame:
-    out = weekly_production_empty_df() if df is None or len(df) == 0 else weekly_production_normalize_df(df.copy()) if False else df.copy()
+    out = weekly_production_empty_df() if df is None or len(df) == 0 else df.copy()
     if out is None or len(out) == 0:
         return weekly_production_empty_df()
     if priority_order:
@@ -2545,7 +2710,6 @@ def weekly_production_reorder_so(df: pd.DataFrame, so_number: str, direction: st
         groups[idx + 1], groups[idx] = groups[idx], groups[idx + 1]
     rebuilt = pd.concat([block for _so, block in groups], ignore_index=True) if groups else weekly_production_empty_df()
     return weekly_production_reset_priorities(rebuilt)
-
 
 def _weekly_text(*values: Any) -> str:
     for value in values:
@@ -2801,6 +2965,10 @@ def weekly_production_rows_from_sales_order(client: SOSReadonlyClient, so_number
             qty_ordered = int(float(ln.get('quantity') or ln.get('qty') or 0))
         except Exception:
             qty_ordered = 0
+        try:
+            qty_invoiced = int(float(ln.get('quantityInvoiced') or ln.get('qtyInvoiced') or ln.get('invoicedQuantity') or ln.get('quantityBilled') or 0))
+        except Exception:
+            qty_invoiced = 0
         qty_shipped = int(shipped_map.get(product, 0))
         qty_remaining = max(qty_ordered - qty_shipped, 0)
         shipped_dates = ', '.join(sorted(set(date_map.get(product, [])))) or all_ship_dates
@@ -2814,10 +2982,16 @@ def weekly_production_rows_from_sales_order(client: SOSReadonlyClient, so_number
             'SO Number': so_number,
             'QTY Ordered': qty_ordered,
             'QTY Shipped': qty_shipped,
+            'QTY Invoiced': qty_invoiced,
             'QTY Remaining': qty_remaining,
             'Date Shipped': shipped_dates,
             'Tracking Number': tracking_numbers,
+            'Status': '',
+            'Assigned To': '',
+            'Blocker': '',
             'Notes': notes,
+            'Last Updated By': '',
+            'Last Updated At': '',
         })
 
     if not rows:
@@ -2881,17 +3055,12 @@ def weekly_refresh_from_open_sales_orders(
 
 def weekly_save_priority_state_from_board(board_df: pd.DataFrame) -> None:
     board_df = weekly_production_normalize_df(board_df)
-    ordered_sos = list(dict.fromkeys(board_df['SO Number'].astype(str).tolist()))
-    state = weekly_prod_load_state()
-    state['priority_order'] = ordered_sos
-    state['row_overrides'] = weekly_prod_build_row_overrides(board_df)
-    state['last_refresh_iso'] = pd.Timestamp.now().isoformat()
-    weekly_prod_save_state(state)
+    weekly_prod_save_board_to_backends(board_df, actor=str(st.session_state.get('weekly_actor_name', '') or ''))
 
 
 def weekly_prepare_display_df(board_df: pd.DataFrame) -> pd.DataFrame:
     board_df = weekly_production_normalize_df(board_df)
-    cols = ['Customer', 'Product Type', 'Product', 'SO Number', 'QTY Ordered', 'QTY Shipped', 'QTY Remaining', 'Date Shipped', 'Tracking Number', 'Notes']
+    cols = ['Customer', 'Product', 'SO Number', 'QTY Ordered', 'QTY Shipped', 'QTY Invoiced', 'QTY Remaining', 'Status', 'Assigned To', 'Date Shipped', 'Tracking Number', 'Notes', 'Blocker']
     if board_df.empty:
         return pd.DataFrame(columns=cols)
     display_rows: List[Dict[str, Any]] = []
@@ -2899,30 +3068,36 @@ def weekly_prepare_display_df(board_df: pd.DataFrame) -> pd.DataFrame:
         first = block.iloc[0]
         display_rows.append({
             'Customer': first.get('Customer', ''),
-            'Product Type': '',
             'Product': '',
             'SO Number': so,
             'QTY Ordered': '',
             'QTY Shipped': '',
+            'QTY Invoiced': '',
             'QTY Remaining': '',
+            'Status': '',
+            'Assigned To': '',
             'Date Shipped': '',
             'Tracking Number': '',
             'Notes': '',
+            'Blocker': '',
             '_row_kind': 'header',
             '_shipped_week': False,
         })
         for _, row in block.iterrows():
             display_rows.append({
                 'Customer': '',
-                'Product Type': row.get('Product Type', ''),
                 'Product': row.get('Product', ''),
                 'SO Number': '',
                 'QTY Ordered': row.get('QTY Ordered', 0),
                 'QTY Shipped': row.get('QTY Shipped', 0),
+                'QTY Invoiced': row.get('QTY Invoiced', 0),
                 'QTY Remaining': row.get('QTY Remaining', 0),
+                'Status': row.get('Status', ''),
+                'Assigned To': row.get('Assigned To', ''),
                 'Date Shipped': row.get('Date Shipped', ''),
                 'Tracking Number': row.get('Tracking Number', ''),
                 'Notes': row.get('Notes', ''),
+                'Blocker': row.get('Blocker', ''),
                 '_row_kind': 'line',
                 '_shipped_week': weekly_is_row_shipped_this_week(row),
             })
@@ -2938,26 +3113,23 @@ def weekly_render_display_table(board_df: pd.DataFrame, title: str, force_green:
 
     def _style_rows(row: pd.Series) -> List[str]:
         if row.get('_row_kind') == 'header':
-            return ['background-color: #f4d36b; font-weight: 700;' if c != '_row_kind' and c != '_shipped_week' else '' for c in row.index]
+            return ['background-color: #f4d36b; font-weight: 700;' if c not in ['_row_kind', '_shipped_week'] else '' for c in row.index]
         if force_green or bool(row.get('_shipped_week')):
-            return ['background-color: #00ff00;' if c != '_row_kind' and c != '_shipped_week' else '' for c in row.index]
+            return ['background-color: #00ff00;' if c not in ['_row_kind', '_shipped_week'] else '' for c in row.index]
         return ['' for _ in row.index]
 
     shown = display_df.copy()
-    styler = shown.style.apply(_style_rows, axis=1)
     try:
-        styler = styler.hide(axis='columns', subset=['_row_kind', '_shipped_week'])
+        styler = shown.style.apply(_style_rows, axis=1).hide(axis='columns', subset=['_row_kind', '_shipped_week'])
+        st.dataframe(styler, use_container_width=True, hide_index=True, height=min(620, 42 * (len(shown) + 1)))
     except Exception:
         shown = shown.drop(columns=['_row_kind', '_shipped_week'], errors='ignore')
         st.dataframe(shown, use_container_width=True, hide_index=True, height=min(620, 42 * (len(shown) + 1)))
-        return
-
-    st.dataframe(styler, use_container_width=True, hide_index=True, height=min(620, 42 * (len(shown) + 1)))
 
 
 def render_weekly_production_workspace():
     st.subheader('Weekly Production')
-    st.caption('Live weekly production board from SOS. Refresh open sales orders, keep manual priority, and show closed orders shipped this week in green until next Monday.')
+    st.caption('Live weekly production board from SOS. Refresh open sales orders, keep manual priority, and save workflow state to Google Sheets when configured.')
 
     auth_url = sos_build_auth_url()
     client: Optional[SOSReadonlyClient] = None
@@ -2982,8 +3154,9 @@ def render_weekly_production_workspace():
     st.session_state['weekly_shipped_week_df'] = weekly_production_normalize_df(st.session_state.get('weekly_shipped_week_df'))
 
     saved_state = weekly_prod_load_state()
+    storage_label = 'Google Sheets' if weekly_gsheet_is_configured() else f'Local file: {weekly_prod_state_path().name}'
     if st.session_state['weekly_prod_df'].empty and saved_state.get('priority_order'):
-        st.caption(f"Priority state file: {weekly_prod_state_path().name}")
+        st.caption(f"Workflow state backend: {storage_label}")
 
     with st.expander('SOS connection', expanded=False):
         c1, c2 = st.columns([1, 2])
@@ -2993,6 +3166,12 @@ def render_weekly_production_workspace():
             st.write(status_text)
             if auth_url:
                 st.markdown(f'[Connect to SOS]({auth_url})')
+
+    actor_cols = st.columns([1.2, 1.8])
+    with actor_cols[0]:
+        st.text_input('Updated by', key='weekly_actor_name', placeholder='Thiago')
+    with actor_cols[1]:
+        st.caption(f'Workflow state backend: {storage_label}')
 
     ctl1, ctl2, ctl3 = st.columns([1.4, 1.1, 1.1])
     refresh_feedback = st.container()
@@ -3021,7 +3200,7 @@ def render_weekly_production_workspace():
                         st.session_state['weekly_last_refreshed_text'] = stamp
                         st.session_state['weekly_refresh_status'] = (
                             f"Loaded {len(open_sos)} open sales order(s). "
-                            f"Shipped This Week contains {len(shipped_this_week)} row(s)."
+                            f"Shipped This Week contains {len(shipped_this_week)} row(s). Saved via {storage_label}."
                         )
                         progress_ph.success(st.session_state['weekly_refresh_status'])
                         status_box.update(label='Weekly Production refresh complete', state='complete', expanded=False)
@@ -3039,7 +3218,7 @@ def render_weekly_production_workspace():
         st.session_state['weekly_last_refreshed_text'] = ''
         st.session_state['weekly_refresh_status'] = 'Weekly board cleared.'
         st.session_state['weekly_refresh_error'] = ''
-        weekly_prod_save_state(weekly_prod_state_default())
+        weekly_prod_clear_backends()
         st.rerun()
 
     info_cols = st.columns([1.2, 2.4])
@@ -3120,23 +3299,48 @@ def render_weekly_production_workspace():
     m1.metric('Open Sales Orders', int(board_df['SO Number'].astype(str).nunique()) if not board_df.empty else 0)
     m2.metric('Open Rows', len(board_df))
     m3.metric('Qty Ordered', int(pd.to_numeric(board_df['QTY Ordered'], errors='coerce').fillna(0).sum()) if not board_df.empty else 0)
-    m4.metric('Qty Remaining', int(pd.to_numeric(board_df['QTY Remaining'], errors='coerce').fillna(0).sum()) if not board_df.empty else 0)
-    m5.metric('Shipped This Week', len(shipped_df))
+    m4.metric('Qty Invoiced', int(pd.to_numeric(board_df['QTY Invoiced'], errors='coerce').fillna(0).sum()) if not board_df.empty else 0)
+    m5.metric('Qty Remaining', int(pd.to_numeric(board_df['QTY Remaining'], errors='coerce').fillna(0).sum()) if not board_df.empty else 0)
+    st.caption(f'Shipped This Week rows: {len(shipped_df)}')
 
     weekly_render_display_table(board_df, 'Active Open Orders')
 
     st.markdown('#### Editable open board')
     edited_df = st.data_editor(
-        board_df,
+        board_df.drop(columns=['Product Type'], errors='ignore'),
         use_container_width=True,
         num_rows='dynamic',
         hide_index=True,
         key='weekly_prod_editor',
         height=360,
-        disabled=['Priority', 'Customer', 'Product', 'SO Number', 'QTY Ordered', 'QTY Shipped', 'QTY Remaining', 'Date Shipped', 'Tracking Number'],
+        disabled=['Priority', 'Customer', 'Product', 'SO Number', 'QTY Ordered', 'QTY Shipped', 'QTY Invoiced', 'QTY Remaining', 'Date Shipped', 'Tracking Number', 'Last Updated By', 'Last Updated At'],
+        column_config={
+            'Status': st.column_config.SelectboxColumn('Status', options=['', 'Not Started', 'Picking Parts', 'Building', 'Testing', 'Packed', 'Ready to Ship', 'Shipped', 'Blocked']),
+            'Assigned To': st.column_config.TextColumn('Assigned To'),
+            'Blocker': st.column_config.TextColumn('Blocker'),
+            'Notes': st.column_config.TextColumn('Notes', width='large'),
+        },
     )
-    edited_df = weekly_production_normalize_df(pd.DataFrame(edited_df))
+    edited_df = pd.DataFrame(edited_df)
+    if 'Product Type' not in edited_df.columns:
+        edited_df['Product Type'] = board_df.get('Product Type', '').values if not board_df.empty else ''
+    edited_df = weekly_production_normalize_df(edited_df)
     if not edited_df.equals(board_df):
+        actor = str(st.session_state.get('weekly_actor_name', '') or '')
+        stamp = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
+        for idx in edited_df.index:
+            key_cols = ['Status', 'Assigned To', 'Blocker', 'Notes']
+            changed = False
+            if idx in board_df.index:
+                for c in key_cols:
+                    if str(edited_df.at[idx, c]) != str(board_df.at[idx, c]):
+                        changed = True
+                        break
+            else:
+                changed = True
+            if changed and actor:
+                edited_df.at[idx, 'Last Updated By'] = actor
+                edited_df.at[idx, 'Last Updated At'] = stamp
         st.session_state['weekly_prod_df'] = edited_df
         weekly_save_priority_state_from_board(edited_df)
         board_df = edited_df
@@ -3148,7 +3352,7 @@ def render_weekly_production_workspace():
 
     with st.expander('How it works', expanded=False):
         st.write('• Refresh open sales orders pulls current open sales orders from SOS and rebuilds the active board.')
-        st.write('• The app preserves your saved priority order and row notes in a local state file.')
+        st.write('• The app preserves your priority, status, assignee, blocker, and notes in Google Sheets when configured, or a local state file otherwise.')
         st.write('• If an order was on the board and becomes fully shipped this week, it stays in the green shipped-this-week section until Monday.')
         st.write('• On Monday, last week shipped orders naturally drop out of the green section because they are no longer in the current week.')
 

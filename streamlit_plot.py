@@ -46,6 +46,20 @@ except Exception:
 
 st.set_page_config(page_title='Derated + Arduino + Plot', layout='wide')
 
+st.markdown("""
+<style>
+.main .block-container {
+    padding-top: 1rem;
+    padding-left: 1rem;
+    padding-right: 1rem;
+    max-width: 100%;
+}
+[data-testid="stMetricValue"] {
+    font-size: 1.55rem;
+}
+</style>
+""", unsafe_allow_html=True)
+
 PAIR_RE = re.compile(r'^(RX|TX|INF)_(\d{4})\.(CSV|TML)$', re.IGNORECASE)
 
 
@@ -1782,29 +1796,47 @@ class SOSReadonlyClient:
             "Authorization": f"Bearer {access_token}",
         }
 
-    def _get(self, endpoint: str, params: Optional[dict] = None, allowable_attempts: int = 4) -> dict:
+    def _get(self, endpoint: str, params: Optional[dict] = None, allowable_attempts: int = 5) -> dict:
         attempts = 0
         last_json: dict = {}
+        last_error: Optional[Exception] = None
+        timeout_seconds = 30
         while attempts < allowable_attempts:
             attempts += 1
-            resp = requests.get(SOS_BASE_URL + endpoint, headers=self.headers, params=params, timeout=15)
+            try:
+                resp = requests.get(SOS_BASE_URL + endpoint, headers=self.headers, params=params, timeout=timeout_seconds)
+            except requests.exceptions.Timeout as exc:
+                last_error = exc
+                if attempts < allowable_attempts:
+                    continue
+                raise RuntimeError(f"SOS GET timed out after {timeout_seconds}s for endpoint '{endpoint}'. Try again or reduce the SO scope.") from exc
+            except requests.exceptions.RequestException as exc:
+                last_error = exc
+                if attempts < allowable_attempts:
+                    continue
+                raise RuntimeError(f"SOS connection error for endpoint '{endpoint}': {exc}") from exc
+
             try:
                 last_json = resp.json()
             except Exception:
                 last_json = {"status": "error", "message": resp.text or "", "code": resp.status_code}
 
-            if "throttle" in str(last_json.get("message", "")).lower():
-                continue
+            message_lower = str(last_json.get("message", "")).lower()
+            if "throttle" in message_lower or resp.status_code in (429, 502, 503, 504):
+                if attempts < allowable_attempts:
+                    continue
             if resp.ok:
                 return last_json
             if resp.status_code == 400:
-                if "throttle" in str(last_json.get("message", "")).lower():
+                if "throttle" in message_lower and attempts < allowable_attempts:
                     continue
                 if last_json.get("status", "") == "invalid":
                     return last_json
             if resp.status_code == 404:
                 raise ValueError(404)
             raise RuntimeError(f"SOS GET failed ({resp.status_code}): {last_json.get('message', resp.text)}")
+        if last_error is not None:
+            raise RuntimeError(f"SOS connection error for endpoint '{endpoint}': {last_error}") from last_error
         return last_json
 
     def get_sales_orders(self, query: str, maxresults: int = 20) -> List[Dict[str, Any]]:
@@ -3962,58 +3994,69 @@ def render_weekly_production_workspace():
     default_inventory_so = selected_so if selected_so else (sales_orders[0] if sales_orders else '')
     inventory_so_number = default_inventory_so
 
-    left_board_col, right_inventory_col = st.columns([1.7, 1.05])
+    if 'weekly_inventory_view_mode' not in st.session_state:
+        st.session_state['weekly_inventory_view_mode'] = 'split'
 
-    with left_board_col:
-        weekly_render_display_table(board_df, 'Active Open Orders')
+    vm1, vm2, vm3 = st.columns([1, 1, 1])
+    if vm1.button('↔️ Split View', key='weekly_view_split', use_container_width=True):
+        st.session_state['weekly_inventory_view_mode'] = 'split'
+    if vm2.button('📋 Focus Orders', key='weekly_view_orders', use_container_width=True):
+        st.session_state['weekly_inventory_view_mode'] = 'orders'
+    if vm3.button('🔎 Focus Inventory', key='weekly_view_inventory', use_container_width=True):
+        st.session_state['weekly_inventory_view_mode'] = 'inventory'
 
-    with right_inventory_col:
-        st.markdown('#### SO inventory check')
-        st.caption('Select one sales order and keep the live SOS inventory check on the right side of the same board.')
-        inventory_so_number = st.selectbox(
-            'Sales order',
-            options=sales_orders,
-            index=sales_orders.index(default_inventory_so) if default_inventory_so in sales_orders else 0,
-            key='weekly_inventory_so',
-            disabled=not sales_orders,
-            placeholder='Select a sales order',
-        ) if sales_orders else ''
-        inventory_explode = st.checkbox('Explode subassemblies', value=True, key='weekly_inventory_explode')
-        run_inventory_check = st.button('Check inventory now', key='weekly_inventory_check_btn', use_container_width=True, disabled=not inventory_so_number)
+    view_mode = st.session_state.get('weekly_inventory_view_mode', 'split')
 
-        if run_inventory_check:
-            if client is None:
-                st.error('SOS is not connected yet.')
-            elif not inventory_so_number:
-                st.warning('Choose a sales order first.')
-            else:
-                try:
-                    with st.spinner(f'Checking live SOS inventory for {inventory_so_number}...'):
-                        inv_df = sos_grouped_sales_order_dataframe(client, inventory_so_number.strip(), explode=inventory_explode)
-                    st.session_state['weekly_inventory_result_df'] = inv_df.copy()
-                    st.session_state['weekly_inventory_result_so'] = inventory_so_number.strip()
-                    st.session_state['weekly_inventory_last_fetch_text'] = pd.Timestamp.now().strftime('%Y-%m-%d %I:%M:%S %p')
-                    if inv_df.empty:
-                        st.warning(f'No inventory rows were returned from SOS for {inventory_so_number.strip()}.')
-                    else:
-                        shortage_count = int(pd.to_numeric(inv_df.get('Short', 0), errors='coerce').fillna(0).gt(0).sum()) if 'Short' in inv_df.columns else 0
-                        st.success(f'Inventory check complete for {inventory_so_number.strip()}. Shortage rows: {shortage_count}.')
-                except Exception as exc:
-                    st.error(f'Could not run inventory check for {inventory_so_number}: {exc}')
+    def _render_inventory_panel(container):
+        with container:
+            st.markdown('## SO inventory check')
+            st.caption('Keep the inventory side wide when you want to inspect the live SOS result in detail.')
+            inventory_so_number_local = st.selectbox(
+                'Sales order',
+                options=sales_orders,
+                index=sales_orders.index(default_inventory_so) if default_inventory_so in sales_orders else 0,
+                key='weekly_inventory_so',
+                disabled=not sales_orders,
+                placeholder='Select a sales order',
+            ) if sales_orders else ''
+            inventory_explode = st.checkbox('Explode subassemblies', value=True, key='weekly_inventory_explode')
+            run_inventory_check = st.button('Check inventory now', key='weekly_inventory_check_btn', use_container_width=True, disabled=not inventory_so_number_local)
 
-        inv_result_df = pd.DataFrame(st.session_state.get('weekly_inventory_result_df', pd.DataFrame())).copy()
-        inv_result_so = str(st.session_state.get('weekly_inventory_result_so', '')).strip()
-        inv_result_stamp = str(st.session_state.get('weekly_inventory_last_fetch_text', '')).strip()
+            if run_inventory_check:
+                if client is None:
+                    st.error('SOS is not connected yet.')
+                elif not inventory_so_number_local:
+                    st.warning('Choose a sales order first.')
+                else:
+                    try:
+                        with st.spinner(f'Checking live SOS inventory for {inventory_so_number_local}...'):
+                            inv_df = sos_grouped_sales_order_dataframe(client, inventory_so_number_local.strip(), explode=inventory_explode)
+                        st.session_state['weekly_inventory_result_df'] = inv_df.copy()
+                        st.session_state['weekly_inventory_result_so'] = inventory_so_number_local.strip()
+                        st.session_state['weekly_inventory_last_fetch_text'] = pd.Timestamp.now().strftime('%Y-%m-%d %I:%M:%S %p')
+                        if inv_df.empty:
+                            st.warning(f'No inventory rows were returned from SOS for {inventory_so_number_local.strip()}.')
+                        else:
+                            shortage_count = int(pd.to_numeric(inv_df.get('Short', 0), errors='coerce').fillna(0).gt(0).sum()) if 'Short' in inv_df.columns else 0
+                            st.success(f'Inventory check complete for {inventory_so_number_local.strip()}. Shortage rows: {shortage_count}.')
+                    except Exception as exc:
+                        st.error(f'Could not run inventory check for {inventory_so_number_local}: {exc}')
 
-        if inv_result_so and inv_result_so != inventory_so_number:
-            st.info(f'Currently showing last fetched result for {inv_result_so}.')
+            inv_result_df = pd.DataFrame(st.session_state.get('weekly_inventory_result_df', pd.DataFrame())).copy()
+            inv_result_so = str(st.session_state.get('weekly_inventory_result_so', '')).strip()
+            inv_result_stamp = str(st.session_state.get('weekly_inventory_last_fetch_text', '')).strip()
 
-        if inv_result_df.empty or not inv_result_so:
-            st.info('Pick a sales order on the left priority controls or here, then click Check inventory now.')
-        else:
+            if inv_result_so and inv_result_so != inventory_so_number_local:
+                st.info(f'Currently showing last fetched result for {inv_result_so}.')
+
+            if inv_result_df.empty or not inv_result_so:
+                st.info('Pick a sales order on the left or here, then click Check inventory now.')
+                return
+
+            st.markdown(f'## Sales Order  
+`{inv_result_so}`')
             if inv_result_stamp:
-                st.caption(f'{inv_result_so} • SOS live API • {inv_result_stamp}')
-            st.caption(f'Allocation backend: {weekly_alloc_backend_name()}')
+                st.caption(f'SOS live API • {inv_result_stamp} • allocation backend: {weekly_alloc_backend_name()}')
 
             all_alloc_df = weekly_alloc_load_df()
             alloc_aware_df = weekly_alloc_apply(inv_result_df, all_alloc_df, inv_result_so)
@@ -4025,10 +4068,9 @@ def render_weekly_production_workspace():
             if 'Assembly / SO Line' in alloc_aware_df.columns and not alloc_aware_df.empty:
                 buildable_after_alloc = int(pd.to_numeric(alloc_aware_df.get('Net Buildable Qty', 0), errors='coerce').fillna(0).min()) if 'Net Buildable Qty' in alloc_aware_df.columns else 0
                 requested_qty = int(pd.to_numeric(alloc_aware_df.get('Needed', 0), errors='coerce').fillna(0).max()) if 'Needed' in alloc_aware_df.columns else 0
-            r1, r2 = st.columns(2)
+            r1, r2, r3, r4 = st.columns(4)
             r1.metric('Net Short Rows', net_short_rows)
             r2.metric('Buildable', f'{buildable_after_alloc}/{requested_qty}' if requested_qty else str(buildable_after_alloc))
-            r3, r4 = st.columns(2)
             r3.metric('Rows', len(inv_result_df))
             r4.metric('Live SOS Short', shortage_rows)
 
@@ -4042,12 +4084,23 @@ def render_weekly_production_workspace():
                         .agg(Net_Short_Total=('NetShort_num', 'sum'), Needed_Total=('Needed_num', 'sum'), Lines=('Part Number', 'count'))
                         .sort_values(['Net_Short_Total', 'Needed_Total'], ascending=False)
                     )
-                    st.markdown('**Top shortages**')
+                    st.markdown('### Top shortages')
                     st.dataframe(shortage_by_part.head(12), use_container_width=True, hide_index=True, height=220)
                 else:
                     st.success('No net shortages after allocations for this sales order.')
 
-            st.markdown('**Allocate / reserve for this SO**')
+            st.markdown('### Exploded BOM by sales order line')
+            if 'Assembly / SO Line' in alloc_aware_df.columns and not alloc_aware_df.empty:
+                for line_label, line_df in alloc_aware_df.groupby('Assembly / SO Line', sort=False):
+                    line_short_rows = int(pd.to_numeric(line_df.get('Net Short', 0), errors='coerce').fillna(0).gt(0).sum()) if 'Net Short' in line_df.columns else 0
+                    line_buildable = int(pd.to_numeric(line_df.get('Net Buildable Qty', 0), errors='coerce').fillna(0).min()) if 'Net Buildable Qty' in line_df.columns else 0
+                    title = f"{line_label} • buildable {line_buildable} • shortage rows {line_short_rows}"
+                    with st.expander(title, expanded=True):
+                        st.dataframe(line_df, use_container_width=True, hide_index=True, height=min(420, 80 + 36 * len(line_df)))
+            else:
+                st.dataframe(alloc_aware_df, use_container_width=True, hide_index=True, height=420)
+
+            st.markdown('### Allocate / reserve for this SO')
             default_plan = weekly_alloc_build_default_plan(inv_result_df)
             existing_alloc = all_alloc_df[all_alloc_df['so_number'].astype(str) == str(inv_result_so)] if not all_alloc_df.empty and 'so_number' in all_alloc_df.columns else pd.DataFrame()
             if not existing_alloc.empty:
@@ -4095,6 +4148,16 @@ def render_weekly_production_workspace():
                 if not all_alloc_df.empty:
                     st.markdown('**Current allocations across sales orders**')
                     st.dataframe(all_alloc_df, use_container_width=True, hide_index=True, height=220)
+
+    if view_mode == 'split':
+        left_board_col, right_inventory_col = st.columns([1.25, 1.55])
+        with left_board_col:
+            weekly_render_display_table(board_df, 'Active Open Orders')
+        _render_inventory_panel(right_inventory_col)
+    elif view_mode == 'orders':
+        weekly_render_display_table(board_df, 'Active Open Orders')
+    else:
+        _render_inventory_panel(st.container())
 
     st.markdown('#### Sales order workflow editor')
     so_editor_df = weekly_build_so_editor_df(board_df)

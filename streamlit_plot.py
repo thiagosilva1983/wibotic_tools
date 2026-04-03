@@ -4624,6 +4624,300 @@ def render_arduino_workspace():
 
 inject_branding()
 render_app_header()
+
+# =============================
+# Rev AA patch - shared central DB backend for Weekly Production
+# =============================
+try:
+    from config import settings as shared_settings
+    from db import get_session as shared_db_get_session
+    from sqlalchemy import text as sql_text
+    SHARED_WEEKLY_DB_AVAILABLE = bool(getattr(shared_settings, 'database_url', ''))
+except Exception:
+    shared_settings = None
+    shared_db_get_session = None
+    sql_text = None
+    SHARED_WEEKLY_DB_AVAILABLE = False
+
+
+def weekly_shared_db_configured() -> bool:
+    return bool(SHARED_WEEKLY_DB_AVAILABLE and shared_db_get_session is not None and sql_text is not None)
+
+
+def weekly_gsheet_backend_name() -> str:
+    if weekly_shared_db_configured():
+        return 'Central Database'
+    return 'Google Sheets' if weekly_gsheet_configured() else 'Local JSON'
+
+
+def weekly_db_load_backend_board() -> pd.DataFrame:
+    if not weekly_shared_db_configured():
+        return weekly_production_empty_df()
+    try:
+        with shared_db_get_session() as session:
+            rows = session.execute(sql_text("""
+                SELECT
+                    so_number,
+                    customer_name,
+                    status,
+                    priority_rank,
+                    priority_label,
+                    assigned_to,
+                    internal_note,
+                    buildable_qty,
+                    shortage_count,
+                    main_blocker,
+                    shipped_flag,
+                    raw_json,
+                    updated_at
+                FROM sales_orders
+                WHERE active = TRUE
+                ORDER BY COALESCE(priority_rank, 999999), so_number
+            """)).mappings().all()
+    except Exception:
+        return weekly_production_empty_df()
+
+    board_rows = []
+    for row in rows:
+        so_number = str(row.get('so_number') or '').strip()
+        if not so_number:
+            continue
+        raw = row.get('raw_json') or {}
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                raw = {}
+        line_rows = raw.get('board_rows') if isinstance(raw, dict) else None
+        if isinstance(line_rows, list) and line_rows:
+            for item in line_rows:
+                work = dict(item or {})
+                work.setdefault('SO Number', so_number)
+                work.setdefault('Customer', str(row.get('customer_name') or ''))
+                work.setdefault('Status', str(row.get('status') or ''))
+                work.setdefault('Priority', int(row.get('priority_rank') or 0))
+                work.setdefault('Assigned To', str(row.get('assigned_to') or ''))
+                work.setdefault('Blocker', str(row.get('main_blocker') or ''))
+                work.setdefault('Notes', str(row.get('internal_note') or ''))
+                board_rows.append(work)
+            continue
+
+        board_rows.append({
+            'Priority': int(row.get('priority_rank') or 0),
+            'Customer': str(row.get('customer_name') or ''),
+            'Product Type': '',
+            'Product': str(row.get('priority_label') or ''),
+            'SO Number': so_number,
+            'QTY Ordered': 0,
+            'QTY Shipped': 0,
+            'QTY Invoiced': 0,
+            'QTY Remaining': 0,
+            'Date Shipped': '',
+            'Tracking Number': '',
+            'Status': str(row.get('status') or ''),
+            'Assigned To': str(row.get('assigned_to') or ''),
+            'Blocker': str(row.get('main_blocker') or ''),
+            'Notes': str(row.get('internal_note') or ''),
+            'Updated By': '',
+            'Last Updated At': str(row.get('updated_at') or ''),
+        })
+    return weekly_production_normalize_df(pd.DataFrame(board_rows))
+
+
+def weekly_db_save_backend_board(board_df: pd.DataFrame, changed_by: str = '') -> None:
+    if not weekly_shared_db_configured():
+        return
+    board_df = weekly_production_normalize_df(board_df)
+    if board_df.empty:
+        return
+    now_text = pd.Timestamp.now().isoformat()
+    ordered_sos = list(dict.fromkeys(board_df['SO Number'].astype(str).tolist()))
+    priority_map = {so: idx + 1 for idx, so in enumerate(ordered_sos)}
+    try:
+        with shared_db_get_session() as session:
+            for so_number, grp in board_df.groupby('SO Number', sort=False):
+                so = str(so_number or '').strip()
+                if not so:
+                    continue
+                first = grp.iloc[0]
+                status_text = str(first.get('Status', '') or '')
+                shipped_flag = status_text.strip().lower() == 'shipped' or bool((pd.to_numeric(grp['QTY Remaining'], errors='coerce').fillna(0) <= 0).all())
+                main_blocker = str(first.get('Blocker', '') or '')
+                note_text = str(first.get('Notes', '') or '')
+                assigned_to = str(first.get('Assigned To', '') or '')
+                customer_name = str(first.get('Customer', '') or '')
+                product_name = str(first.get('Product', '') or '')
+                try:
+                    buildable_qty = int(pd.to_numeric(grp['QTY Remaining'], errors='coerce').fillna(0).max())
+                except Exception:
+                    buildable_qty = 0
+                shortage_count = 1 if main_blocker else 0
+                raw_payload = {
+                    'board_rows': grp.to_dict(orient='records'),
+                    'saved_from': 'wibotic_tool_AA',
+                    'saved_at': now_text,
+                }
+                session.execute(sql_text("""
+                    INSERT INTO sales_orders (
+                        so_number, customer_name, status, shipped_flag, active,
+                        priority_rank, priority_label, assigned_to, internal_note,
+                        buildable_qty, shortage_count, main_blocker,
+                        shipped_line_color, raw_json, updated_at
+                    ) VALUES (
+                        :so_number, :customer_name, :status, :shipped_flag, TRUE,
+                        :priority_rank, :priority_label, :assigned_to, :internal_note,
+                        :buildable_qty, :shortage_count, :main_blocker,
+                        :shipped_line_color, CAST(:raw_json AS JSONB), NOW()
+                    )
+                    ON CONFLICT (so_number)
+                    DO UPDATE SET
+                        customer_name = EXCLUDED.customer_name,
+                        status = EXCLUDED.status,
+                        shipped_flag = EXCLUDED.shipped_flag,
+                        active = TRUE,
+                        priority_rank = EXCLUDED.priority_rank,
+                        priority_label = EXCLUDED.priority_label,
+                        assigned_to = EXCLUDED.assigned_to,
+                        internal_note = EXCLUDED.internal_note,
+                        buildable_qty = EXCLUDED.buildable_qty,
+                        shortage_count = EXCLUDED.shortage_count,
+                        main_blocker = EXCLUDED.main_blocker,
+                        shipped_line_color = EXCLUDED.shipped_line_color,
+                        raw_json = EXCLUDED.raw_json,
+                        updated_at = NOW()
+                """), {
+                    'so_number': so,
+                    'customer_name': customer_name,
+                    'status': status_text,
+                    'shipped_flag': shipped_flag,
+                    'priority_rank': int(priority_map.get(so, 999)),
+                    'priority_label': product_name,
+                    'assigned_to': assigned_to,
+                    'internal_note': note_text,
+                    'buildable_qty': buildable_qty,
+                    'shortage_count': int(shortage_count),
+                    'main_blocker': main_blocker,
+                    'shipped_line_color': 'green' if shipped_flag else '',
+                    'raw_json': json.dumps(raw_payload),
+                })
+                if changed_by:
+                    for field_name, new_value in {
+                        'priority_rank': str(int(priority_map.get(so, 999))),
+                        'assigned_to': assigned_to,
+                        'internal_note': note_text,
+                        'status': status_text,
+                        'main_blocker': main_blocker,
+                    }.items():
+                        session.execute(sql_text("""
+                            INSERT INTO audit_log (so_number, field_name, old_value, new_value, changed_by)
+                            VALUES (:so_number, :field_name, NULL, :new_value, :changed_by)
+                        """), {
+                            'so_number': so,
+                            'field_name': field_name,
+                            'new_value': new_value,
+                            'changed_by': changed_by,
+                        })
+    except Exception:
+        return
+
+
+def weekly_prod_load_state() -> Dict[str, Any]:
+    if weekly_shared_db_configured():
+        backend_board = weekly_db_load_backend_board()
+        if not backend_board.empty:
+            state = weekly_prod_state_default()
+            state['backend'] = 'Central Database'
+            state['priority_order'] = list(dict.fromkeys(backend_board['SO Number'].astype(str).tolist()))
+            state['so_overrides'] = weekly_prod_build_so_overrides(backend_board)
+            return state
+    backend_board = weekly_gsheet_load_backend_board() if weekly_gsheet_configured() else weekly_production_empty_df()
+    if not backend_board.empty:
+        state = weekly_prod_state_default()
+        state['backend'] = 'Google Sheets'
+        ordered = list(dict.fromkeys(backend_board['SO Number'].astype(str).tolist()))
+        state['priority_order'] = ordered
+        state['so_overrides'] = weekly_prod_build_so_overrides(backend_board)
+        return state
+    if weekly_gsheet_configured():
+        try:
+            ws = weekly_gsheet_get_worksheet()
+            rows = ws.get_all_records() or []
+            state = weekly_prod_state_default()
+            state['backend'] = 'Google Sheets'
+            sortable = []
+            for row in rows:
+                so = str(row.get('so_number', '') or '').strip()
+                if not so:
+                    continue
+                try:
+                    priority = int(float(row.get('priority', 0) or 0))
+                except Exception:
+                    priority = 0
+                sortable.append((priority if priority > 0 else 999999, so))
+                state['so_overrides'][so] = {
+                    'Priority': priority,
+                    'Customer': str(row.get('customer', '') or ''),
+                    'Status': str(row.get('status', '') or ''),
+                    'Assigned To': str(row.get('assigned_to', '') or ''),
+                    'Blocker': str(row.get('blocker', '') or ''),
+                    'Notes': str(row.get('notes', '') or ''),
+                    'Updated By': str(row.get('last_updated_by', '') or ''),
+                    'Last Updated At': str(row.get('last_updated_at', '') or ''),
+                }
+            state['priority_order'] = [so for _p, so in sorted(sortable, key=lambda t: (t[0], t[1]))]
+            return state
+        except Exception:
+            return weekly_prod_load_state_local()
+    return weekly_prod_load_state_local()
+
+
+def weekly_prod_save_state(state: Dict[str, Any]) -> None:
+    clean = weekly_prod_state_default()
+    clean.update(state or {})
+    clean['backend'] = weekly_gsheet_backend_name()
+    board_df = st.session_state.get('weekly_prod_df') if 'weekly_prod_df' in st.session_state else weekly_production_empty_df()
+    if weekly_shared_db_configured():
+        try:
+            weekly_db_save_backend_board(board_df, changed_by=st.session_state.get('weekly_updated_by', '').strip())
+        except Exception:
+            pass
+    elif weekly_gsheet_configured():
+        try:
+            weekly_gsheet_save_backend_board(board_df)
+            weekly_gsheet_write_pretty_view(board_df)
+        except Exception:
+            pass
+    p = weekly_prod_state_path()
+    p.write_text(json.dumps(clean, indent=2), encoding='utf-8')
+
+
+def weekly_save_priority_state_from_board(board_df: pd.DataFrame) -> None:
+    board_df = weekly_production_normalize_df(board_df)
+    ordered_sos = list(dict.fromkeys(board_df['SO Number'].astype(str).tolist()))
+    state = weekly_prod_load_state()
+    state['priority_order'] = ordered_sos
+    state['so_overrides'] = weekly_prod_build_so_overrides(board_df)
+    state['last_refresh_iso'] = pd.Timestamp.now().isoformat()
+    if weekly_shared_db_configured():
+        try:
+            weekly_db_save_backend_board(board_df, changed_by=st.session_state.get('weekly_updated_by', '').strip())
+        except Exception:
+            pass
+    weekly_prod_save_state(state)
+
+
+def weekly_shared_bootstrap_session_state() -> None:
+    if not weekly_shared_db_configured():
+        return
+    if 'weekly_prod_df' not in st.session_state or weekly_production_normalize_df(st.session_state.get('weekly_prod_df')).empty:
+        loaded = weekly_db_load_backend_board()
+        if not loaded.empty:
+            st.session_state['weekly_prod_df'] = loaded
+            st.session_state['weekly_refresh_status'] = 'Loaded weekly board from central database.'
+    if 'weekly_shipped_week_df' not in st.session_state:
+        st.session_state['weekly_shipped_week_df'] = weekly_production_empty_df()
+
+weekly_shared_bootstrap_session_state()
 active_workspace = render_workspace_selector()
 
 if active_workspace == 'Derate Reports':

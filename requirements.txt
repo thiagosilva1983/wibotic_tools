@@ -8,3 +8,7 @@ reportlab
 requests
 gspread
 google-auth
+sqlalchemy
+psycopg2-binary
+python-dotenv
+streamlit-autorefresh

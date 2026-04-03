@@ -4053,8 +4053,7 @@ def render_weekly_production_workspace():
                 st.info('Pick a sales order on the left or here, then click Check inventory now.')
                 return
 
-            st.markdown(f'## Sales Order  
-`{inv_result_so}`')
+            st.markdown(f'''## Sales Order  `{inv_result_so}`''')
             if inv_result_stamp:
                 st.caption(f'SOS live API • {inv_result_stamp} • allocation backend: {weekly_alloc_backend_name()}')
 

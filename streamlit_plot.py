@@ -1,4 +1,4 @@
-# Rev AC - shipment serials + customer PO for Nabtesco shipments
+# Rev J - shipment serials + customer PO for Nabtesco shipments
 import io
 import base64
 import json
@@ -3952,11 +3952,6 @@ def render_weekly_production_workspace():
     m4.metric('Qty Remaining', int(pd.to_numeric(board_df['QTY Remaining'], errors='coerce').fillna(0).sum()) if not board_df.empty else 0)
     m5.metric('Shipped This Week', len(shipped_df))
 
-    weekly_render_display_table(board_df, 'Active Open Orders')
-
-    st.markdown('#### Sales order inventory check')
-    st.caption('Check live SOS inventory availability for the selected sales order right beside the weekly board. The result shows buildable quantity, shortages, and limiting parts.')
-
     if 'weekly_inventory_result_df' not in st.session_state:
         st.session_state['weekly_inventory_result_df'] = pd.DataFrame()
     if 'weekly_inventory_result_so' not in st.session_state:
@@ -3964,145 +3959,142 @@ def render_weekly_production_workspace():
     if 'weekly_inventory_last_fetch_text' not in st.session_state:
         st.session_state['weekly_inventory_last_fetch_text'] = ''
 
-    inv_left, inv_mid, inv_right = st.columns([1.45, 1.0, 1.2])
     default_inventory_so = selected_so if selected_so else (sales_orders[0] if sales_orders else '')
-    inventory_so_number = inv_left.selectbox(
-        'Sales order to check against SOS inventory',
-        options=sales_orders,
-        index=sales_orders.index(default_inventory_so) if default_inventory_so in sales_orders else 0,
-        key='weekly_inventory_so',
-        disabled=not sales_orders,
-        placeholder='Select a sales order',
-    ) if sales_orders else ''
-    inventory_explode = inv_mid.checkbox('Explode subassemblies', value=True, key='weekly_inventory_explode')
-    run_inventory_check = inv_right.button('Check inventory now', key='weekly_inventory_check_btn', use_container_width=True, disabled=not inventory_so_number)
+    inventory_so_number = default_inventory_so
 
-    if run_inventory_check:
-        if client is None:
-            st.error('SOS is not connected yet.')
-        elif not inventory_so_number:
-            st.warning('Choose a sales order first.')
+    left_board_col, right_inventory_col = st.columns([1.7, 1.05])
+
+    with left_board_col:
+        weekly_render_display_table(board_df, 'Active Open Orders')
+
+    with right_inventory_col:
+        st.markdown('#### SO inventory check')
+        st.caption('Select one sales order and keep the live SOS inventory check on the right side of the same board.')
+        inventory_so_number = st.selectbox(
+            'Sales order',
+            options=sales_orders,
+            index=sales_orders.index(default_inventory_so) if default_inventory_so in sales_orders else 0,
+            key='weekly_inventory_so',
+            disabled=not sales_orders,
+            placeholder='Select a sales order',
+        ) if sales_orders else ''
+        inventory_explode = st.checkbox('Explode subassemblies', value=True, key='weekly_inventory_explode')
+        run_inventory_check = st.button('Check inventory now', key='weekly_inventory_check_btn', use_container_width=True, disabled=not inventory_so_number)
+
+        if run_inventory_check:
+            if client is None:
+                st.error('SOS is not connected yet.')
+            elif not inventory_so_number:
+                st.warning('Choose a sales order first.')
+            else:
+                try:
+                    with st.spinner(f'Checking live SOS inventory for {inventory_so_number}...'):
+                        inv_df = sos_grouped_sales_order_dataframe(client, inventory_so_number.strip(), explode=inventory_explode)
+                    st.session_state['weekly_inventory_result_df'] = inv_df.copy()
+                    st.session_state['weekly_inventory_result_so'] = inventory_so_number.strip()
+                    st.session_state['weekly_inventory_last_fetch_text'] = pd.Timestamp.now().strftime('%Y-%m-%d %I:%M:%S %p')
+                    if inv_df.empty:
+                        st.warning(f'No inventory rows were returned from SOS for {inventory_so_number.strip()}.')
+                    else:
+                        shortage_count = int(pd.to_numeric(inv_df.get('Short', 0), errors='coerce').fillna(0).gt(0).sum()) if 'Short' in inv_df.columns else 0
+                        st.success(f'Inventory check complete for {inventory_so_number.strip()}. Shortage rows: {shortage_count}.')
+                except Exception as exc:
+                    st.error(f'Could not run inventory check for {inventory_so_number}: {exc}')
+
+        inv_result_df = pd.DataFrame(st.session_state.get('weekly_inventory_result_df', pd.DataFrame())).copy()
+        inv_result_so = str(st.session_state.get('weekly_inventory_result_so', '')).strip()
+        inv_result_stamp = str(st.session_state.get('weekly_inventory_last_fetch_text', '')).strip()
+
+        if inv_result_so and inv_result_so != inventory_so_number:
+            st.info(f'Currently showing last fetched result for {inv_result_so}.')
+
+        if inv_result_df.empty or not inv_result_so:
+            st.info('Pick a sales order on the left priority controls or here, then click Check inventory now.')
         else:
-            try:
-                with st.spinner(f'Checking live SOS inventory for {inventory_so_number}...'):
-                    inv_df = sos_grouped_sales_order_dataframe(client, inventory_so_number.strip(), explode=inventory_explode)
-                st.session_state['weekly_inventory_result_df'] = inv_df.copy()
-                st.session_state['weekly_inventory_result_so'] = inventory_so_number.strip()
-                st.session_state['weekly_inventory_last_fetch_text'] = pd.Timestamp.now().strftime('%Y-%m-%d %I:%M:%S %p')
-                if inv_df.empty:
-                    st.warning(f'No inventory rows were returned from SOS for {inventory_so_number.strip()}.')
-                else:
-                    shortage_count = int(pd.to_numeric(inv_df.get('Short', 0), errors='coerce').fillna(0).gt(0).sum()) if 'Short' in inv_df.columns else 0
-                    st.success(f'Live SOS inventory check complete for {inventory_so_number.strip()}. Rows returned: {len(inv_df)}. Shortage rows: {shortage_count}.')
-            except Exception as exc:
-                st.error(f'Could not run inventory check for {inventory_so_number}: {exc}')
-
-    inv_result_df = pd.DataFrame(st.session_state.get('weekly_inventory_result_df', pd.DataFrame())).copy()
-    inv_result_so = str(st.session_state.get('weekly_inventory_result_so', '')).strip()
-    inv_result_stamp = str(st.session_state.get('weekly_inventory_last_fetch_text', '')).strip()
-
-    if not inv_result_df.empty and inv_result_so:
-        with st.expander(f'Inventory result for {inv_result_so}', expanded=True):
             if inv_result_stamp:
-                st.caption(f'Data source: SOS live API • Fetched at: {inv_result_stamp}')
+                st.caption(f'{inv_result_so} • SOS live API • {inv_result_stamp}')
             st.caption(f'Allocation backend: {weekly_alloc_backend_name()}')
 
             all_alloc_df = weekly_alloc_load_df()
             alloc_aware_df = weekly_alloc_apply(inv_result_df, all_alloc_df, inv_result_so)
 
-            summary_cols = st.columns(4)
             shortage_rows = int(pd.to_numeric(inv_result_df.get('Short', 0), errors='coerce').fillna(0).gt(0).sum()) if 'Short' in inv_result_df.columns else 0
             net_short_rows = int(pd.to_numeric(alloc_aware_df.get('Net Short', 0), errors='coerce').fillna(0).gt(0).sum()) if 'Net Short' in alloc_aware_df.columns else 0
-            summary_cols[0].metric('Rows Returned', len(inv_result_df))
-            summary_cols[1].metric('Live SOS Shortage Rows', shortage_rows)
-            summary_cols[2].metric('Net Shortage Rows', net_short_rows)
-            summary_cols[3].metric('Assemblies / SO Lines', int(inv_result_df['Assembly / SO Line'].astype(str).nunique()) if 'Assembly / SO Line' in inv_result_df.columns else 0)
+            buildable_after_alloc = 0
+            requested_qty = 0
+            if 'Assembly / SO Line' in alloc_aware_df.columns and not alloc_aware_df.empty:
+                buildable_after_alloc = int(pd.to_numeric(alloc_aware_df.get('Net Buildable Qty', 0), errors='coerce').fillna(0).min()) if 'Net Buildable Qty' in alloc_aware_df.columns else 0
+                requested_qty = int(pd.to_numeric(alloc_aware_df.get('Needed', 0), errors='coerce').fillna(0).max()) if 'Needed' in alloc_aware_df.columns else 0
+            r1, r2 = st.columns(2)
+            r1.metric('Net Short Rows', net_short_rows)
+            r2.metric('Buildable', f'{buildable_after_alloc}/{requested_qty}' if requested_qty else str(buildable_after_alloc))
+            r3, r4 = st.columns(2)
+            r3.metric('Rows', len(inv_result_df))
+            r4.metric('Live SOS Short', shortage_rows)
 
-            if 'Assembly / SO Line' in alloc_aware_df.columns:
-                buildability_summary_rows = []
-                for source_name, grp in alloc_aware_df.groupby('Assembly / SO Line'):
-                    requested_qty = int(pd.to_numeric(grp.get('Needed', 0), errors='coerce').fillna(0).max()) if not grp.empty else 0
-                    live_buildable = int(pd.to_numeric(grp.get('Buildable Qty', 0), errors='coerce').fillna(0).min()) if 'Buildable Qty' in grp.columns and not grp.empty else 0
-                    net_buildable = int(pd.to_numeric(grp.get('Net Buildable Qty', 0), errors='coerce').fillna(0).min()) if 'Net Buildable Qty' in grp.columns and not grp.empty else 0
-                    limiting_parts = ', '.join(
-                        grp.loc[pd.to_numeric(grp.get('Net Short', 0), errors='coerce').fillna(0) > 0, 'Part Number'].astype(str).tolist()
-                    ) if 'Part Number' in grp.columns else ''
-                    buildability_summary_rows.append({
-                        'Assembly / SO Line': source_name,
-                        'Requested Qty': requested_qty,
-                        'Live Buildable': live_buildable,
-                        'Net Buildable After Allocations': net_buildable,
-                        'Enough After Allocation': '✅' if net_buildable >= requested_qty else '❌',
-                        'Limiting Part(s)': limiting_parts,
-                    })
-                if buildability_summary_rows:
-                    st.markdown('**Allocation-aware buildability summary**')
-                    st.dataframe(pd.DataFrame(buildability_summary_rows), use_container_width=True, hide_index=True, height=240)
+            if 'Part Number' in alloc_aware_df.columns:
+                shortage_only_df = alloc_aware_df[pd.to_numeric(alloc_aware_df.get('Net Short', 0), errors='coerce').fillna(0) > 0].copy()
+                if not shortage_only_df.empty:
+                    shortage_only_df['NetShort_num'] = pd.to_numeric(shortage_only_df['Net Short'], errors='coerce').fillna(0)
+                    shortage_only_df['Needed_num'] = pd.to_numeric(shortage_only_df.get('Needed', 0), errors='coerce').fillna(0)
+                    shortage_by_part = (
+                        shortage_only_df.groupby('Part Number', as_index=False)
+                        .agg(Net_Short_Total=('NetShort_num', 'sum'), Needed_Total=('Needed_num', 'sum'), Lines=('Part Number', 'count'))
+                        .sort_values(['Net_Short_Total', 'Needed_Total'], ascending=False)
+                    )
+                    st.markdown('**Top shortages**')
+                    st.dataframe(shortage_by_part.head(12), use_container_width=True, hide_index=True, height=220)
+                else:
+                    st.success('No net shortages after allocations for this sales order.')
 
-            alloc_left, alloc_right = st.columns([1.15, 1.85])
-            with alloc_left:
-                st.markdown('**Allocate / reserve materials for this SO**')
-                default_plan = weekly_alloc_build_default_plan(inv_result_df)
-                existing_alloc = all_alloc_df[all_alloc_df['so_number'].astype(str) == str(inv_result_so)] if not all_alloc_df.empty and 'so_number' in all_alloc_df.columns else pd.DataFrame()
-                if not existing_alloc.empty:
-                    existing_map = existing_alloc.set_index('part_number')['qty_allocated'].to_dict()
-                    default_plan['Qty To Allocate'] = default_plan['Part Number'].map(existing_map).fillna(default_plan['Qty To Allocate'])
-                alloc_plan_df = st.data_editor(
-                    default_plan,
-                    key=weekly_alloc_plan_editor_key(inv_result_so),
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        'Part Number': st.column_config.TextColumn(disabled=True),
-                        'Needed': st.column_config.NumberColumn(disabled=True, format='%0.2f'),
-                        'On Hand': st.column_config.NumberColumn(disabled=True, format='%0.2f'),
-                        'Qty To Allocate': st.column_config.NumberColumn(min_value=0.0, step=1.0, format='%0.2f'),
-                    },
+            st.markdown('**Allocate / reserve for this SO**')
+            default_plan = weekly_alloc_build_default_plan(inv_result_df)
+            existing_alloc = all_alloc_df[all_alloc_df['so_number'].astype(str) == str(inv_result_so)] if not all_alloc_df.empty and 'so_number' in all_alloc_df.columns else pd.DataFrame()
+            if not existing_alloc.empty:
+                existing_map = existing_alloc.set_index('part_number')['qty_allocated'].to_dict()
+                default_plan['Qty To Allocate'] = default_plan['Part Number'].map(existing_map).fillna(default_plan['Qty To Allocate'])
+            alloc_plan_df = st.data_editor(
+                default_plan,
+                key=weekly_alloc_plan_editor_key(inv_result_so),
+                use_container_width=True,
+                hide_index=True,
+                height=260,
+                column_config={
+                    'Part Number': st.column_config.TextColumn(disabled=True),
+                    'Needed': st.column_config.NumberColumn(disabled=True, format='%0.2f'),
+                    'On Hand': st.column_config.NumberColumn(disabled=True, format='%0.2f'),
+                    'Qty To Allocate': st.column_config.NumberColumn(min_value=0.0, step=1.0, format='%0.2f'),
+                },
+            )
+            alloc_user = st.session_state.get('weekly_updated_by', '').strip()
+            a1, a2 = st.columns(2)
+            if a1.button('Allocate to this SO', key=f'weekly_allocate_btn_{inv_result_so}', use_container_width=True):
+                try:
+                    weekly_alloc_save_for_so(inv_result_so, pd.DataFrame(alloc_plan_df), allocated_by=alloc_user)
+                    st.success(f'Allocation saved for {inv_result_so}.')
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f'Could not save allocation: {exc}')
+            if a2.button('Release allocation', key=f'weekly_release_btn_{inv_result_so}', use_container_width=True):
+                try:
+                    weekly_alloc_release_so(inv_result_so)
+                    st.success(f'Allocation released for {inv_result_so}.')
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f'Could not release allocation: {exc}')
+
+            with st.expander('Show detailed inventory result', expanded=False):
+                st.dataframe(alloc_aware_df, use_container_width=True, hide_index=True, height=420)
+                st.download_button(
+                    'Download inventory CSV',
+                    data=alloc_aware_df.to_csv(index=False).encode('utf-8'),
+                    file_name=sos_safe_default_filename(f'{inv_result_so}_inventory_check_with_allocations'),
+                    mime='text/csv',
+                    key='weekly_inventory_dl',
                 )
-                alloc_user = st.session_state.get('weekly_updated_by', '').strip()
-                a1, a2 = st.columns(2)
-                if a1.button('Allocate to this SO', key=f'weekly_allocate_btn_{inv_result_so}', use_container_width=True):
-                    try:
-                        weekly_alloc_save_for_so(inv_result_so, pd.DataFrame(alloc_plan_df), allocated_by=alloc_user)
-                        st.success(f'Allocation saved for {inv_result_so}.')
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f'Could not save allocation: {exc}')
-                if a2.button('Release allocation', key=f'weekly_release_btn_{inv_result_so}', use_container_width=True):
-                    try:
-                        weekly_alloc_release_so(inv_result_so)
-                        st.success(f'Allocation released for {inv_result_so}.')
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f'Could not release allocation: {exc}')
-
-            with alloc_right:
-                if 'Part Number' in alloc_aware_df.columns:
-                    shortage_only_df = alloc_aware_df[pd.to_numeric(alloc_aware_df.get('Net Short', 0), errors='coerce').fillna(0) > 0].copy()
-                    if not shortage_only_df.empty:
-                        shortage_only_df['NetShort_num'] = pd.to_numeric(shortage_only_df['Net Short'], errors='coerce').fillna(0)
-                        shortage_only_df['Needed_num'] = pd.to_numeric(shortage_only_df.get('Needed', 0), errors='coerce').fillna(0)
-                        shortage_by_part = (
-                            shortage_only_df.groupby('Part Number', as_index=False)
-                            .agg(Net_Short_Total=('NetShort_num', 'sum'), Needed_Total=('Needed_num', 'sum'), Lines=('Part Number', 'count'))
-                            .sort_values(['Net_Short_Total', 'Needed_Total'], ascending=False)
-                        )
-                        st.markdown('**Top net shortages after allocations**')
-                        st.dataframe(shortage_by_part, use_container_width=True, hide_index=True, height=220)
-
                 if not all_alloc_df.empty:
                     st.markdown('**Current allocations across sales orders**')
                     st.dataframe(all_alloc_df, use_container_width=True, hide_index=True, height=220)
-
-            st.markdown('**Live SOS result with allocation-aware columns**')
-            st.dataframe(alloc_aware_df, use_container_width=True, hide_index=True, height=520)
-            st.download_button(
-                'Download inventory CSV',
-                data=alloc_aware_df.to_csv(index=False).encode('utf-8'),
-                file_name=sos_safe_default_filename(f'{inv_result_so}_inventory_check_with_allocations'),
-                mime='text/csv',
-                key='weekly_inventory_dl',
-            )
 
     st.markdown('#### Sales order workflow editor')
     so_editor_df = weekly_build_so_editor_df(board_df)

@@ -1,4 +1,4 @@
-# Rev J - shipment serials + customer PO for Nabtesco shipments
+# Rev AC - shipment serials + customer PO for Nabtesco shipments
 import io
 import base64
 import json

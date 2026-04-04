@@ -44,7 +44,7 @@ except Exception:
     Credentials = None
     GSPREAD_AVAILABLE = False
 
-st.set_page_config(page_title='Derated + Arduino + Plot', layout='wide')
+st.set_page_config(page_title='WiBotic Weekly Production | Label Studio', layout='wide')
 
 st.markdown("""
 <style>
@@ -3509,19 +3509,9 @@ def weekly_prepare_display_df(board_df: pd.DataFrame) -> pd.DataFrame:
     cols = ['Priority', 'Customer', 'SO Number', 'Product', 'QTY Ordered', 'QTY Shipped', 'QTY Invoiced', 'QTY Remaining', 'Status', 'Assigned To', 'Blocker', 'Notes']
     if board_df.empty:
         return pd.DataFrame(columns=cols)
-
-    def _is_fully_shipped_row(row_like: Any) -> bool:
-        ordered = float(pd.to_numeric((row_like.get('QTY Ordered', 0) if hasattr(row_like, 'get') else 0), errors='coerce') or 0)
-        shipped = float(pd.to_numeric((row_like.get('QTY Shipped', 0) if hasattr(row_like, 'get') else 0), errors='coerce') or 0)
-        remaining = float(pd.to_numeric((row_like.get('QTY Remaining', 0) if hasattr(row_like, 'get') else 0), errors='coerce') or 0)
-        if ordered <= 0:
-            return False
-        return (shipped >= ordered) or (remaining <= 0)
-
     display_rows: List[Dict[str, Any]] = []
     for so, block in board_df.groupby('SO Number', sort=False):
         first = block.iloc[0]
-        header_complete = bool(block.apply(_is_fully_shipped_row, axis=1).all())
         display_rows.append({
             'Priority': first.get('Priority', ''),
             'Customer': first.get('Customer', ''),
@@ -3537,10 +3527,9 @@ def weekly_prepare_display_df(board_df: pd.DataFrame) -> pd.DataFrame:
             'Notes': first.get('Notes', ''),
             '_row_kind': 'header',
             '_shipped_week': False,
-            '_header_complete': header_complete,
+            '_header_complete': bool((pd.to_numeric(block['QTY Remaining'], errors='coerce').fillna(0) <= 0).all()),
         })
         for _, row in block.iterrows():
-            line_complete = _is_fully_shipped_row(row)
             display_rows.append({
                 'Priority': '',
                 'Customer': '',
@@ -3555,7 +3544,7 @@ def weekly_prepare_display_df(board_df: pd.DataFrame) -> pd.DataFrame:
                 'Blocker': '',
                 'Notes': '',
                 '_row_kind': 'line',
-                '_shipped_week': line_complete or weekly_is_row_shipped_this_week(row),
+                '_shipped_week': weekly_is_row_shipped_this_week(row),
                 '_header_complete': False,
             })
     return pd.DataFrame(display_rows)
@@ -4064,7 +4053,7 @@ def render_weekly_production_workspace():
                 st.info('Pick a sales order on the left or here, then click Check inventory now.')
                 return
 
-            st.markdown(f'''## Sales Order  `{inv_result_so}`''')
+            st.markdown(f"## Sales Order\n\n`{inv_result_so}`")
             if inv_result_stamp:
                 st.caption(f'SOS live API • {inv_result_stamp} • allocation backend: {weekly_alloc_backend_name()}')
 
@@ -4209,11 +4198,12 @@ def render_weekly_production_workspace():
 
 
 def render_workspace_selector():
-    options = ['Derate Reports', 'Arduino Viewer', 'Plot Explorer', 'Label Studio', 'RF Calculator', 'SOS Inventory', 'Weekly Production']
+    options = ['Weekly Production', 'SOS Inventory', 'Label Studio']
+    default_workspace = st.session_state.get('active_workspace', 'Weekly Production')
     selected = st.radio(
         'Workspace',
         options,
-        index=options.index(st.session_state.get('active_workspace', 'RF Calculator')) if st.session_state.get('active_workspace', 'RF Calculator') in options else 0,
+        index=options.index(default_workspace) if default_workspace in options else 0,
         horizontal=True,
         key='active_workspace',
         label_visibility='collapsed',
@@ -4405,8 +4395,8 @@ def _workspace_intro(title, description=''):
 
 
 def render_app_header():
-    st.markdown("## WiBotic Engineering Toolkit")
-    st.caption("Derate, Arduino, Plot, Label, RF, and SOS inventory tools in one Streamlit app.")
+    st.markdown("## WiBotic Weekly Production Toolkit")
+    st.caption("Weekly Production, SOS Inventory, and Label Studio.")
 
 
 # -----------------------------

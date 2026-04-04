@@ -3509,9 +3509,19 @@ def weekly_prepare_display_df(board_df: pd.DataFrame) -> pd.DataFrame:
     cols = ['Priority', 'Customer', 'SO Number', 'Product', 'QTY Ordered', 'QTY Shipped', 'QTY Invoiced', 'QTY Remaining', 'Status', 'Assigned To', 'Blocker', 'Notes']
     if board_df.empty:
         return pd.DataFrame(columns=cols)
+
+    def _is_fully_shipped_row(row_like: Any) -> bool:
+        ordered = float(pd.to_numeric((row_like.get('QTY Ordered', 0) if hasattr(row_like, 'get') else 0), errors='coerce') or 0)
+        shipped = float(pd.to_numeric((row_like.get('QTY Shipped', 0) if hasattr(row_like, 'get') else 0), errors='coerce') or 0)
+        remaining = float(pd.to_numeric((row_like.get('QTY Remaining', 0) if hasattr(row_like, 'get') else 0), errors='coerce') or 0)
+        if ordered <= 0:
+            return False
+        return (shipped >= ordered) or (remaining <= 0)
+
     display_rows: List[Dict[str, Any]] = []
     for so, block in board_df.groupby('SO Number', sort=False):
         first = block.iloc[0]
+        header_complete = bool(block.apply(_is_fully_shipped_row, axis=1).all())
         display_rows.append({
             'Priority': first.get('Priority', ''),
             'Customer': first.get('Customer', ''),
@@ -3527,9 +3537,10 @@ def weekly_prepare_display_df(board_df: pd.DataFrame) -> pd.DataFrame:
             'Notes': first.get('Notes', ''),
             '_row_kind': 'header',
             '_shipped_week': False,
-            '_header_complete': bool((pd.to_numeric(block['QTY Remaining'], errors='coerce').fillna(0) <= 0).all()),
+            '_header_complete': header_complete,
         })
         for _, row in block.iterrows():
+            line_complete = _is_fully_shipped_row(row)
             display_rows.append({
                 'Priority': '',
                 'Customer': '',
@@ -3544,7 +3555,7 @@ def weekly_prepare_display_df(board_df: pd.DataFrame) -> pd.DataFrame:
                 'Blocker': '',
                 'Notes': '',
                 '_row_kind': 'line',
-                '_shipped_week': weekly_is_row_shipped_this_week(row),
+                '_shipped_week': line_complete or weekly_is_row_shipped_this_week(row),
                 '_header_complete': False,
             })
     return pd.DataFrame(display_rows)

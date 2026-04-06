@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import inch
 from reportlab.graphics.barcode import code39
@@ -44,7 +45,7 @@ except Exception:
     Credentials = None
     GSPREAD_AVAILABLE = False
 
-st.set_page_config(page_title='Wibotic Weekly Production | SOS Inventory | Label Studio', layout='wide')
+st.set_page_config(page_title='Derated + Arduino + Plot', layout='wide')
 
 st.markdown("""
 <style>
@@ -3504,6 +3505,22 @@ def weekly_save_priority_state_from_board(board_df: pd.DataFrame) -> None:
     weekly_prod_save_state(state)
 
 
+
+def _is_fully_shipped_row(row: pd.Series) -> bool:
+    try:
+        ordered = float(pd.to_numeric(row.get('QTY Ordered', 0), errors='coerce') or 0)
+        shipped = float(pd.to_numeric(row.get('QTY Shipped', 0), errors='coerce') or 0)
+        remaining = float(pd.to_numeric(row.get('QTY Remaining', 0), errors='coerce') or 0)
+    except Exception:
+        ordered = 0.0
+        shipped = 0.0
+        remaining = 0.0
+    if ordered > 0 and shipped >= ordered:
+        return True
+    if ordered > 0 and remaining <= 0:
+        return True
+    return False
+
 def weekly_prepare_display_df(board_df: pd.DataFrame) -> pd.DataFrame:
     board_df = weekly_production_normalize_df(board_df)
     cols = ['Priority', 'Customer', 'SO Number', 'Product', 'QTY Ordered', 'QTY Shipped', 'QTY Invoiced', 'QTY Remaining', 'Status', 'Assigned To', 'Blocker', 'Notes']
@@ -3512,6 +3529,7 @@ def weekly_prepare_display_df(board_df: pd.DataFrame) -> pd.DataFrame:
     display_rows: List[Dict[str, Any]] = []
     for so, block in board_df.groupby('SO Number', sort=False):
         first = block.iloc[0]
+        header_complete = bool(block.apply(_is_fully_shipped_row, axis=1).all())
         display_rows.append({
             'Priority': first.get('Priority', ''),
             'Customer': first.get('Customer', ''),
@@ -3527,9 +3545,10 @@ def weekly_prepare_display_df(board_df: pd.DataFrame) -> pd.DataFrame:
             'Notes': first.get('Notes', ''),
             '_row_kind': 'header',
             '_shipped_week': False,
-            '_header_complete': bool((pd.to_numeric(block['QTY Remaining'], errors='coerce').fillna(0) <= 0).all()),
+            '_header_complete': header_complete,
         })
         for _, row in block.iterrows():
+            line_complete = _is_fully_shipped_row(row)
             display_rows.append({
                 'Priority': '',
                 'Customer': '',
@@ -3544,7 +3563,7 @@ def weekly_prepare_display_df(board_df: pd.DataFrame) -> pd.DataFrame:
                 'Blocker': '',
                 'Notes': '',
                 '_row_kind': 'line',
-                '_shipped_week': weekly_is_row_shipped_this_week(row),
+                '_shipped_week': line_complete or weekly_is_row_shipped_this_week(row),
                 '_header_complete': False,
             })
     return pd.DataFrame(display_rows)
@@ -3801,6 +3820,7 @@ def render_weekly_production_workspace():
     st.subheader('Weekly Production')
     st.caption('Live weekly production board from SOS. Priority is per sales order, item lines are grouped underneath, and shipped rows are highlighted green.')
     st.caption(f"Workflow state backend: {weekly_gsheet_backend_name()}")
+    auto_refresh_tick = st_autorefresh(interval=120000, key='weekly_auto_refresh_tick')
 
     auth_url = sos_build_auth_url()
     client: Optional[SOSReadonlyClient] = None
@@ -3848,6 +3868,9 @@ def render_weekly_production_workspace():
     ctl1, ctl2, ctl3 = st.columns([1.4, 1.1, 1.1])
     refresh_feedback = st.container()
     refresh_clicked = ctl1.button('Refresh open sales orders', key='weekly_refresh_open', use_container_width=True)
+    auto_refresh_due = bool(auto_refresh_tick) and int(auto_refresh_tick) > 0
+    if auto_refresh_due and not refresh_clicked and client is not None:
+        refresh_clicked = True
     if refresh_clicked:
         st.session_state['weekly_refresh_status'] = ''
         st.session_state['weekly_refresh_error'] = ''
@@ -4053,7 +4076,8 @@ def render_weekly_production_workspace():
                 st.info('Pick a sales order on the left or here, then click Check inventory now.')
                 return
 
-            st.markdown(f"## Sales Order\n\n`{inv_result_so}`")
+            st.markdown(f'## Sales Order  
+`{inv_result_so}`')
             if inv_result_stamp:
                 st.caption(f'SOS live API • {inv_result_stamp} • allocation backend: {weekly_alloc_backend_name()}')
 
@@ -4198,11 +4222,11 @@ def render_weekly_production_workspace():
 
 
 def render_workspace_selector():
-    options = ['Label Studio', 'SOS Inventory', 'Weekly Production']
+    options = ['Derate Reports', 'Arduino Viewer', 'Plot Explorer', 'Label Studio', 'RF Calculator', 'SOS Inventory', 'Weekly Production']
     selected = st.radio(
         'Workspace',
         options,
-        index=options.index(st.session_state.get('active_workspace', 'Weekly Production')) if st.session_state.get('active_workspace', 'Weekly Production') in options else 0,
+        index=options.index(st.session_state.get('active_workspace', 'RF Calculator')) if st.session_state.get('active_workspace', 'RF Calculator') in options else 0,
         horizontal=True,
         key='active_workspace',
         label_visibility='collapsed',
@@ -4395,7 +4419,7 @@ def _workspace_intro(title, description=''):
 
 def render_app_header():
     st.markdown("## WiBotic Engineering Toolkit")
-    st.caption("Weekly Production, SOS Inventory, and Label Studio in one Streamlit app.")
+    st.caption("Derate, Arduino, Plot, Label, RF, and SOS inventory tools in one Streamlit app.")
 
 
 # -----------------------------
@@ -4994,9 +5018,17 @@ inject_branding()
 render_app_header()
 active_workspace = render_workspace_selector()
 
-if active_workspace == 'Label Studio':
+if active_workspace == 'Derate Reports':
+    render_derate_workspace()
+elif active_workspace == 'Arduino Viewer':
+    render_arduino_workspace()
+elif active_workspace == 'Plot Explorer':
+    render_plot_tab()
+elif active_workspace == 'Label Studio':
     render_label_tab()
 elif active_workspace == 'SOS Inventory':
     render_sos_workspace()
-else:
+elif active_workspace == 'Weekly Production':
     render_weekly_production_workspace()
+else:
+    render_rf_tab()

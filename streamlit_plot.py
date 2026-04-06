@@ -45,7 +45,7 @@ except Exception:
     Credentials = None
     GSPREAD_AVAILABLE = False
 
-st.set_page_config(page_title='Derated + Arduino + Plot', layout='wide')
+st.set_page_config(page_title='Wibotic Weekly Production | SOS Inventory | Label Studio', layout='wide')
 
 st.markdown("""
 <style>
@@ -2519,6 +2519,7 @@ def weekly_prod_state_default() -> Dict[str, Any]:
     return {
         'priority_order': [],
         'so_overrides': {},
+        'ignored_sos': [],
         'last_refresh_iso': '',
         'backend': 'Local JSON',
     }
@@ -2679,6 +2680,8 @@ def weekly_prod_load_state_local() -> Dict[str, Any]:
             state['priority_order'] = []
         if not isinstance(state.get('so_overrides'), dict):
             state['so_overrides'] = {}
+        if not isinstance(state.get('ignored_sos'), list):
+            state['ignored_sos'] = []
         state['backend'] = 'Local JSON'
         return state
     except Exception:
@@ -2723,6 +2726,8 @@ def weekly_prod_load_state() -> Dict[str, Any]:
                     'Last Updated At': str(row.get('last_updated_at', '') or ''),
                 }
             state['priority_order'] = [so for _p, so in sorted(sortable, key=lambda t: (t[0], t[1]))]
+            if not isinstance(state.get('ignored_sos'), list):
+                state['ignored_sos'] = []
             return state
         except Exception:
             return weekly_prod_load_state_local()
@@ -2743,6 +2748,71 @@ def weekly_prod_save_state(state: Dict[str, Any]) -> None:
     p = weekly_prod_state_path()
     p.write_text(json.dumps(clean, indent=2), encoding='utf-8')
 
+
+
+
+
+def weekly_extract_so_year(so_number: Any) -> Optional[int]:
+    so_txt = str(so_number or "").strip()
+    if not so_txt:
+        return None
+    parts = re.split(r"[^0-9]+", so_txt)
+    for p in parts:
+        if len(p) == 4 and p.isdigit():
+            year = int(p)
+            if 2000 <= year <= 2100:
+                return year
+    return None
+
+
+def weekly_should_auto_ignore_so(so_number: Any, status: Any, current_year: Optional[int] = None) -> bool:
+    status_txt = str(status or "").strip().lower()
+    if not any(k in status_txt for k in ["closed", "complete", "cancel", "void"]):
+        return False
+    if current_year is None:
+        current_year = pd.Timestamp.now().year
+    so_year = weekly_extract_so_year(so_number)
+    if so_year is None:
+        return False
+    return so_year < current_year
+
+
+def weekly_load_ignored_sos() -> List[str]:
+    state = weekly_prod_load_state() or {}
+    ignored = state.get("ignored_sos") or []
+    return [str(x).strip() for x in ignored if str(x).strip()]
+
+
+def weekly_save_ignored_sos(ignored_sos: List[str]) -> None:
+    state = weekly_prod_load_state() or weekly_prod_state_default()
+    state["ignored_sos"] = sorted(list({str(x).strip() for x in ignored_sos if str(x).strip()}))
+    weekly_prod_save_state(state)
+
+
+def weekly_apply_ignore_filters(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return weekly_production_empty_df()
+
+    out = weekly_production_normalize_df(df)
+    ignored_sos = set(weekly_load_ignored_sos())
+    current_year = pd.Timestamp.now().year
+
+    keep_mask = []
+    for _, row in out.iterrows():
+        so = str(row.get("SO Number", "") or "").strip()
+        status = row.get("Status", "")
+        if not so:
+            keep_mask.append(False)
+            continue
+        if so in ignored_sos:
+            keep_mask.append(False)
+            continue
+        if weekly_should_auto_ignore_so(so, status, current_year=current_year):
+            keep_mask.append(False)
+            continue
+        keep_mask.append(True)
+
+    return out.loc[keep_mask].reset_index(drop=True)
 
 
 def weekly_gsheet_write_pretty_view(board_df: pd.DataFrame) -> None:
@@ -3817,10 +3887,20 @@ def weekly_alloc_plan_editor_key(so_number: str) -> str:
 
 
 def render_weekly_production_workspace():
+    if "weekly_is_refreshing" not in st.session_state:
+        st.session_state["weekly_is_refreshing"] = False
+
     st.subheader('Weekly Production')
     st.caption('Live weekly production board from SOS. Priority is per sales order, item lines are grouped underneath, and shipped rows are highlighted green.')
     st.caption(f"Workflow state backend: {weekly_gsheet_backend_name()}")
-    auto_refresh_tick = st_autorefresh(interval=120000, key='weekly_auto_refresh_tick')
+    if st.session_state.get("weekly_is_refreshing", False):
+        st.warning("Weekly board is updating from SOS...")
+    else:
+        st.caption("Weekly board status: idle")
+
+    auto_refresh_tick = 0
+    if not st.session_state.get('weekly_is_refreshing', False):
+        auto_refresh_tick = st_autorefresh(interval=180000, key='weekly_auto_refresh_tick')
 
     auth_url = sos_build_auth_url()
     client: Optional[SOSReadonlyClient] = None
@@ -3841,13 +3921,13 @@ def render_weekly_production_workspace():
     if 'weekly_refresh_error' not in st.session_state:
         st.session_state['weekly_refresh_error'] = ''
 
-    st.session_state['weekly_prod_df'] = weekly_production_normalize_df(st.session_state.get('weekly_prod_df'))
+    st.session_state['weekly_prod_df'] = weekly_apply_ignore_filters(weekly_production_normalize_df(st.session_state.get('weekly_prod_df')))
     st.session_state['weekly_shipped_week_df'] = weekly_production_normalize_df(st.session_state.get('weekly_shipped_week_df'))
 
     if st.session_state['weekly_prod_df'].empty and weekly_gsheet_configured():
         loaded_board = weekly_gsheet_load_backend_board()
         if not loaded_board.empty:
-            st.session_state['weekly_prod_df'] = loaded_board
+            st.session_state['weekly_prod_df'] = weekly_apply_ignore_filters(loaded_board)
             st.session_state['weekly_refresh_status'] = 'Loaded saved weekly board from Google Sheets.'
 
     saved_state = weekly_prod_load_state()
@@ -3869,7 +3949,7 @@ def render_weekly_production_workspace():
     refresh_feedback = st.container()
     refresh_clicked = ctl1.button('Refresh open sales orders', key='weekly_refresh_open', use_container_width=True)
     auto_refresh_due = bool(auto_refresh_tick) and int(auto_refresh_tick) > 0
-    if auto_refresh_due and not refresh_clicked and client is not None:
+    if auto_refresh_due and not refresh_clicked and client is not None and not st.session_state.get('weekly_is_refreshing', False):
         refresh_clicked = True
     if refresh_clicked:
         st.session_state['weekly_refresh_status'] = ''
@@ -3888,14 +3968,14 @@ def render_weekly_production_workspace():
                             progress_callback=lambda msg: progress_ph.info(msg),
                         )
                         progress_ph.info('Updating weekly board...')
-                        st.session_state['weekly_prod_df'] = live_board
+                        st.session_state['weekly_prod_df'] = weekly_apply_ignore_filters(live_board)
                         st.session_state['weekly_shipped_week_df'] = shipped_this_week
                         if weekly_gsheet_configured():
                             try:
-                                weekly_gsheet_write_pretty_view(live_board)
+                                weekly_gsheet_write_pretty_view(st.session_state['weekly_prod_df'])
                             except Exception:
                                 pass
-                        weekly_save_priority_state_from_board(live_board)
+                        weekly_save_priority_state_from_board(st.session_state['weekly_prod_df'])
                         stamp = pd.Timestamp.now().strftime('%Y-%m-%d %I:%M:%S %p')
                         st.session_state['weekly_last_refreshed_text'] = stamp
                         st.session_state['weekly_refresh_status'] = (
@@ -3937,6 +4017,28 @@ def render_weekly_production_workspace():
             st.error(refresh_error)
         elif refresh_status:
             st.success(refresh_status)
+
+    st.markdown("#### Ignore / delete old Sales Orders")
+    ignore_so_input = st.text_input(
+        "SO to ignore permanently",
+        key="weekly_ignore_so_input",
+        placeholder="2020-1164 or SO-2024-221"
+    ).strip()
+    ig1, ig2 = st.columns(2)
+    if ig1.button("Ignore SO permanently", key="weekly_ignore_so_btn", use_container_width=True):
+        if ignore_so_input:
+            ignored = weekly_load_ignored_sos()
+            ignored.append(ignore_so_input)
+            weekly_save_ignored_sos(ignored)
+            st.session_state["weekly_prod_df"] = weekly_apply_ignore_filters(st.session_state.get("weekly_prod_df"))
+            st.session_state["weekly_refresh_status"] = f"SO {ignore_so_input} added to ignore list."
+            st.session_state["weekly_refresh_error"] = ""
+            st.rerun()
+    if ig2.button("Clear ignore list", key="weekly_clear_ignore_so_btn", use_container_width=True):
+        weekly_save_ignored_sos([])
+        st.session_state["weekly_refresh_status"] = "Ignore list cleared."
+        st.session_state["weekly_refresh_error"] = ""
+        st.rerun()
 
     with st.expander('Optional manual add / load', expanded=False):
         left, right = st.columns([1.3, 1.7])
@@ -4221,11 +4323,11 @@ def render_weekly_production_workspace():
 
 
 def render_workspace_selector():
-    options = ['Derate Reports', 'Arduino Viewer', 'Plot Explorer', 'Label Studio', 'RF Calculator', 'SOS Inventory', 'Weekly Production']
+    options = ['Label Studio', 'SOS Inventory', 'Weekly Production']
     selected = st.radio(
         'Workspace',
         options,
-        index=options.index(st.session_state.get('active_workspace', 'RF Calculator')) if st.session_state.get('active_workspace', 'RF Calculator') in options else 0,
+        index=options.index(st.session_state.get('active_workspace', 'Weekly Production')) if st.session_state.get('active_workspace', 'Weekly Production') in options else 0,
         horizontal=True,
         key='active_workspace',
         label_visibility='collapsed',
@@ -4418,7 +4520,7 @@ def _workspace_intro(title, description=''):
 
 def render_app_header():
     st.markdown("## WiBotic Engineering Toolkit")
-    st.caption("Derate, Arduino, Plot, Label, RF, and SOS inventory tools in one Streamlit app.")
+    st.caption("Weekly Production, SOS Inventory, and Label Studio in one Streamlit app.")
 
 
 # -----------------------------
@@ -5017,17 +5119,9 @@ inject_branding()
 render_app_header()
 active_workspace = render_workspace_selector()
 
-if active_workspace == 'Derate Reports':
-    render_derate_workspace()
-elif active_workspace == 'Arduino Viewer':
-    render_arduino_workspace()
-elif active_workspace == 'Plot Explorer':
-    render_plot_tab()
-elif active_workspace == 'Label Studio':
+if active_workspace == 'Label Studio':
     render_label_tab()
 elif active_workspace == 'SOS Inventory':
     render_sos_workspace()
-elif active_workspace == 'Weekly Production':
-    render_weekly_production_workspace()
 else:
-    render_rf_tab()
+    render_weekly_production_workspace()

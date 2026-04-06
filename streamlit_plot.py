@@ -3981,7 +3981,7 @@ def weekly_render_active_orders_inline(board_df: pd.DataFrame) -> pd.DataFrame:
     priority_values = {}
     original_priority_values = {}
 
-    widths = [0.7, 1.1, 1.3, 4.4, 1.0, 1.0, 1.0, 1.1]
+    widths = [0.8, 2.2, 2.0, 4.2, 1.0, 1.0, 1.0, 1.1]
     header_cols = st.columns(widths)
     header_names = ["Priority", "Customer", "SO Number", "Product", "QTY Ordered", "QTY Shipped", "QTY Invoiced", "QTY Remaining"]
     for col_obj, name in zip(header_cols, header_names):
@@ -4028,7 +4028,7 @@ def weekly_render_active_orders_inline(board_df: pd.DataFrame) -> pd.DataFrame:
             ]
             for cobj, value in zip(row_cols[1:], vals):
                 cobj.markdown(
-                    f"<div style='background:{bg}; padding:0.45rem 0.5rem; border-radius:0.15rem; font-weight:700; min-height:2.4rem;'>{value}</div>",
+                    f"<div style='background:{bg}; padding:0.45rem 0.5rem; border-radius:0.15rem; font-weight:700; min-height:2.4rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;' title='{value}'>{value}</div>",
                     unsafe_allow_html=True,
                 )
         else:
@@ -4044,7 +4044,7 @@ def weekly_render_active_orders_inline(board_df: pd.DataFrame) -> pd.DataFrame:
             ]
             for cobj, value in zip(row_cols, vals):
                 cobj.markdown(
-                    f"<div style='background:{bg}; padding:0.45rem 0.5rem; border-radius:0.15rem; min-height:2.35rem;'>{value}</div>",
+                    f"<div style='background:{bg}; padding:0.45rem 0.5rem; border-radius:0.15rem; min-height:2.35rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;' title='{value}'>{value}</div>",
                     unsafe_allow_html=True,
                 )
 

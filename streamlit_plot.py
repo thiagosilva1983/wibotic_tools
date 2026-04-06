@@ -1797,11 +1797,11 @@ class SOSReadonlyClient:
             "Authorization": f"Bearer {access_token}",
         }
 
-    def _get(self, endpoint: str, params: Optional[dict] = None, allowable_attempts: int = 5) -> dict:
+    def _get(self, endpoint: str, params: Optional[dict] = None, allowable_attempts: int = 3) -> dict:
         attempts = 0
         last_json: dict = {}
         last_error: Optional[Exception] = None
-        timeout_seconds = 30
+        timeout_seconds = 12
         while attempts < allowable_attempts:
             attempts += 1
             try:
@@ -3526,6 +3526,17 @@ def weekly_build_shipped_this_week_df(current_board: pd.DataFrame, open_sos: Lis
     return weekly_production_reset_priorities(shipped_rows)
 
 
+
+def weekly_get_refresh_limit() -> int:
+    state = weekly_prod_load_state() or {}
+    raw = state.get("max_refresh_sales_orders", 50)
+    try:
+        value = int(raw)
+    except Exception:
+        value = 50
+    return max(10, min(value, 300))
+
+
 def weekly_refresh_from_open_sales_orders(
     client: SOSReadonlyClient,
     existing_board: pd.DataFrame,
@@ -3535,13 +3546,24 @@ def weekly_refresh_from_open_sales_orders(
     if progress_callback:
         progress_callback('Loading current open sales orders...')
     open_rows = weekly_list_open_sales_order_summaries(client, maxresults=1000)
+    all_open_sos = [
+        _weekly_text(row.get('number'), row.get('transactionNumber'))
+        for row in open_rows
+        if _weekly_text(row.get('number'), row.get('transactionNumber'))
+    ]
+    max_so_limit = weekly_get_refresh_limit()
+    if len(open_rows) > max_so_limit:
+        open_rows = open_rows[:max_so_limit]
+        if progress_callback:
+            progress_callback(f'Found {len(all_open_sos)} open sales order(s). Limiting refresh to first {len(open_rows)} for speed.')
+    else:
+        if progress_callback:
+            progress_callback(f'Found {len(all_open_sos)} open sales order(s).')
     open_sos = [
         _weekly_text(row.get('number'), row.get('transactionNumber'))
         for row in open_rows
         if _weekly_text(row.get('number'), row.get('transactionNumber'))
     ]
-    if progress_callback:
-        progress_callback(f'Found {len(open_sos)} open sales order(s).')
     rows: List[pd.DataFrame] = []
     failures: List[str] = []
     total = len(open_rows)
@@ -3896,10 +3918,10 @@ def render_weekly_production_workspace():
     if st.session_state.get("weekly_is_refreshing", False):
         st.warning("Weekly board is updating from SOS...")
     else:
-        st.caption("Weekly board status: idle")
+        st.caption(f"Weekly board status: idle | refresh limit: {weekly_get_refresh_limit()} SOs")
 
     auto_refresh_tick = 0
-    if not st.session_state.get('weekly_is_refreshing', False):
+    if st.session_state.get('weekly_enable_auto_refresh', False) and not st.session_state.get('weekly_is_refreshing', False):
         auto_refresh_tick = st_autorefresh(interval=180000, key='weekly_auto_refresh_tick')
 
     auth_url = sos_build_auth_url()
@@ -3944,6 +3966,28 @@ def render_weekly_production_workspace():
                 st.markdown(f'[Connect to SOS]({auth_url})')
 
     st.text_input('Updated by', key='weekly_updated_by', value=st.session_state.get('weekly_updated_by', ''))
+    cfg1, cfg2 = st.columns([1, 1])
+    refresh_state = weekly_prod_load_state() or {}
+    default_max_so = int(refresh_state.get("max_refresh_sales_orders", 50) or 50)
+    weekly_max_refresh_sos = cfg1.number_input(
+        "Max open SOs per refresh",
+        min_value=10,
+        max_value=300,
+        value=max(10, min(default_max_so, 300)),
+        step=10,
+        key="weekly_max_refresh_sos",
+        help="Limits how many open sales orders are fully loaded during refresh to keep the app responsive."
+    )
+    weekly_enable_auto_refresh = cfg2.checkbox(
+        "Enable auto-refresh every 3 minutes",
+        value=False,
+        key="weekly_enable_auto_refresh",
+        help="Leave this off unless the board is already stable."
+    )
+    refresh_state["max_refresh_sales_orders"] = int(weekly_max_refresh_sos)
+    weekly_prod_save_state(refresh_state)
+
+
 
     ctl1, ctl2, ctl3 = st.columns([1.4, 1.1, 1.1])
     refresh_feedback = st.container()

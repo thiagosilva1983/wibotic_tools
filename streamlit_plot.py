@@ -3908,6 +3908,160 @@ def weekly_alloc_plan_editor_key(so_number: str) -> str:
     return f"weekly_alloc_plan_editor_{str(so_number).strip()}"
 
 
+
+
+def weekly_resequence_priority_editor(previous_df: pd.DataFrame, edited_df: pd.DataFrame) -> pd.DataFrame:
+    prev = previous_df.copy().reset_index(drop=True)
+    edited = edited_df.copy().reset_index(drop=True)
+    if prev.empty or edited.empty or "SO Number" not in prev.columns:
+        return edited
+
+    prev["Priority"] = pd.to_numeric(prev.get("Priority", 0), errors="coerce").fillna(0).astype(int)
+    edited["Priority"] = pd.to_numeric(edited.get("Priority", 0), errors="coerce").fillna(0).astype(int)
+
+    prev_order = prev["SO Number"].astype(str).tolist()
+    changed_rows = []
+    for i in range(min(len(prev), len(edited))):
+        prev_so = str(prev.iloc[i].get("SO Number", "")).strip()
+        new_so = str(edited.iloc[i].get("SO Number", "")).strip()
+        if prev_so != new_so:
+            continue
+        prev_pr = int(prev.iloc[i].get("Priority", 0) or 0)
+        new_pr = int(edited.iloc[i].get("Priority", 0) or 0)
+        if prev_pr != new_pr:
+            changed_rows.append((prev_so, new_pr))
+
+    if not changed_rows:
+        out = edited.copy()
+        out["Priority"] = range(1, len(out) + 1)
+        return out
+
+    so_order = prev_order[:]
+    for changed_so, new_priority in changed_rows:
+        if changed_so in so_order:
+            so_order.remove(changed_so)
+        insert_at = max(0, min(int(new_priority) - 1, len(so_order)))
+        so_order.insert(insert_at, changed_so)
+
+    out = edited.copy()
+    rank_map = {so: idx + 1 for idx, so in enumerate(so_order)}
+    out["_sort_rank"] = out["SO Number"].astype(str).map(rank_map).fillna(999999).astype(int)
+    out = out.sort_values(["_sort_rank"], kind="stable").drop(columns=["_sort_rank"]).reset_index(drop=True)
+    out["Priority"] = range(1, len(out) + 1)
+    return out
+
+
+def weekly_apply_priority_change_inline(board_df: pd.DataFrame, edited_priority_rows: pd.DataFrame) -> pd.DataFrame:
+    original_df = weekly_build_so_editor_df(board_df).copy().reset_index(drop=True)
+    edited_df = edited_priority_rows.copy().reset_index(drop=True)
+    resequenced_df = weekly_resequence_priority_editor(original_df, edited_df)
+
+    now_text = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+    updated_by = st.session_state.get("weekly_updated_by", "").strip()
+    if updated_by and "Updated By" in resequenced_df.columns:
+        resequenced_df["Updated By"] = updated_by
+    if "Last Updated At" in resequenced_df.columns:
+        resequenced_df["Last Updated At"] = now_text
+
+    board_df = weekly_apply_so_editor_df(board_df, resequenced_df)
+    st.session_state["weekly_prod_df"] = board_df
+    weekly_save_priority_state_from_board(board_df)
+    return board_df
+
+
+def weekly_render_active_orders_inline(board_df: pd.DataFrame) -> pd.DataFrame:
+    board_df = weekly_production_normalize_df(board_df)
+    st.markdown("#### Active Open Orders")
+    display_df = weekly_prepare_display_df(board_df)
+    if display_df.empty:
+        st.info("No rows to show.")
+        return board_df
+
+    so_editor_df = weekly_build_so_editor_df(board_df).copy().reset_index(drop=True)
+    priority_values = {}
+    original_priority_values = {}
+
+    widths = [0.7, 1.1, 1.3, 4.4, 1.0, 1.0, 1.0, 1.1]
+    header_cols = st.columns(widths)
+    header_names = ["Priority", "Customer", "SO Number", "Product", "QTY Ordered", "QTY Shipped", "QTY Invoiced", "QTY Remaining"]
+    for col_obj, name in zip(header_cols, header_names):
+        col_obj.markdown(f"**{name}**")
+
+    display_df = display_df.reset_index(drop=True)
+    for idx, row in display_df.iterrows():
+        is_header = row.get("_row_kind") == "header"
+        is_green = bool(row.get("_shipped_week")) or bool(row.get("_header_complete"))
+        if is_header and bool(row.get("_header_complete")):
+            bg = "#b7e1cd"
+        elif is_header:
+            bg = "#f4d36b"
+        elif is_green:
+            bg = "#c6efce"
+        else:
+            bg = "transparent"
+
+        row_cols = st.columns(widths)
+        so = str(row.get("SO Number", "") or "").strip()
+
+        if is_header:
+            # Priority input
+            original_priority = int(pd.to_numeric(row.get("Priority", 0), errors="coerce") or 0)
+            original_priority_values[so] = original_priority
+            new_priority = row_cols[0].number_input(
+                "Priority",
+                min_value=1,
+                value=max(1, original_priority),
+                step=1,
+                key=f"weekly_inline_priority_{so}",
+                label_visibility="collapsed",
+            )
+            priority_values[so] = int(new_priority)
+
+            vals = [
+                str(row.get("Customer", "") or ""),
+                so,
+                "",
+                str(int(pd.to_numeric(row.get("QTY Ordered", 0), errors="coerce") or 0)),
+                str(int(pd.to_numeric(row.get("QTY Shipped", 0), errors="coerce") or 0)),
+                str(int(pd.to_numeric(row.get("QTY Invoiced", 0), errors="coerce") or 0)),
+                str(int(pd.to_numeric(row.get("QTY Remaining", 0), errors="coerce") or 0)),
+            ]
+            for cobj, value in zip(row_cols[1:], vals):
+                cobj.markdown(
+                    f"<div style='background:{bg}; padding:0.45rem 0.5rem; border-radius:0.15rem; font-weight:700; min-height:2.4rem;'>{value}</div>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            vals = [
+                "",
+                "",
+                "",
+                str(row.get("Product", "") or ""),
+                str(int(pd.to_numeric(row.get("QTY Ordered", 0), errors='coerce') or 0)) if str(row.get("QTY Ordered", "")).strip() else "",
+                str(int(pd.to_numeric(row.get("QTY Shipped", 0), errors='coerce') or 0)) if str(row.get("QTY Shipped", "")).strip() else "",
+                str(int(pd.to_numeric(row.get("QTY Invoiced", 0), errors='coerce') or 0)) if str(row.get("QTY Invoiced", "")).strip() else "",
+                str(int(pd.to_numeric(row.get("QTY Remaining", 0), errors='coerce') or 0)) if str(row.get("QTY Remaining", "")).strip() else "",
+            ]
+            for cobj, value in zip(row_cols, vals):
+                cobj.markdown(
+                    f"<div style='background:{bg}; padding:0.45rem 0.5rem; border-radius:0.15rem; min-height:2.35rem;'>{value}</div>",
+                    unsafe_allow_html=True,
+                )
+
+    changed = any(priority_values.get(so) != original_priority_values.get(so) for so in priority_values)
+    if changed:
+        edited_df = so_editor_df.copy()
+        for i in range(len(edited_df)):
+            so = str(edited_df.iloc[i].get("SO Number", "") or "").strip()
+            if so in priority_values:
+                edited_df.at[i, "Priority"] = int(priority_values[so])
+        board_df = weekly_apply_priority_change_inline(board_df, edited_df)
+        st.success("Priority updated and auto-resequenced.")
+        st.rerun()
+
+    return board_df
+
+
 def render_weekly_production_workspace():
     if "weekly_is_refreshing" not in st.session_state:
         st.session_state["weekly_is_refreshing"] = False
@@ -4320,38 +4474,12 @@ def render_weekly_production_workspace():
     if view_mode == 'split':
         left_board_col, right_inventory_col = st.columns([1.25, 1.55])
         with left_board_col:
-            weekly_render_display_table(board_df, 'Active Open Orders')
+            board_df = weekly_render_active_orders_inline(board_df)
         _render_inventory_panel(right_inventory_col)
     elif view_mode == 'orders':
-        weekly_render_display_table(board_df, 'Active Open Orders')
+        board_df = weekly_render_active_orders_inline(board_df)
     else:
         _render_inventory_panel(st.container())
-
-    st.markdown('#### Sales order workflow editor')
-    so_editor_df = weekly_build_so_editor_df(board_df)
-    edited_so_df = st.data_editor(
-        so_editor_df,
-        use_container_width=True,
-        num_rows='fixed',
-        hide_index=True,
-        key='weekly_so_editor',
-        height=320,
-        disabled=['SO Number', 'Customer'],
-        column_config={
-            'Priority': st.column_config.NumberColumn(step=1),
-            'Status': st.column_config.SelectboxColumn(options=['', 'Not Started', 'Picking Parts', 'Building', 'Testing', 'Packed', 'Ready to Ship', 'Shipped', 'Blocked']),
-        },
-    )
-    edited_so_df = pd.DataFrame(edited_so_df)
-    if not edited_so_df.equals(so_editor_df):
-        now_text = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
-        updated_by = st.session_state.get('weekly_updated_by', '').strip()
-        if updated_by:
-            edited_so_df['Updated By'] = updated_by
-        edited_so_df['Last Updated At'] = now_text
-        board_df = weekly_apply_so_editor_df(board_df, edited_so_df)
-        st.session_state['weekly_prod_df'] = board_df
-        weekly_save_priority_state_from_board(board_df)
 
     with st.expander('Shipped this week', expanded=True):
         weekly_render_display_table(shipped_df, 'Closed / completed this week', force_green=True)

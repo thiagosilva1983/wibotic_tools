@@ -4574,7 +4574,7 @@ def _workspace_intro(title, description=''):
 
 
 def render_app_header():
-    st.markdown("## WiBotic Engineering Toolkit")
+    st.markdown("## WiBotic Production")
     st.caption("Weekly Production, SOS Inventory, and Label Studio in one Streamlit app.")
 
 

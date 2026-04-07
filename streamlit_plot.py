@@ -1,4 +1,4 @@
-# Rev AT - shipment serials + customer PO for Nabtesco shipments
+# Rev AU_full - shipment serials + customer PO for Nabtesco shipments
 import io
 import base64
 import json
@@ -4095,10 +4095,32 @@ def render_weekly_production_workspace():
     if "weekly_is_refreshing" not in st.session_state:
         st.session_state["weekly_is_refreshing"] = False
 
-    st.subheader('Weekly Production')
+    st.markdown(
+        f"""<div style='display:flex; align-items:center; gap:0.6rem; margin-bottom:0.2rem;'>
+        <img src="data:image/png;base64,{LOGO_B64}" style="width:28px; height:28px; object-fit:contain;" />
+        <div style="font-size:2.05rem; font-weight:700; color:#0f172a;">Weekly Production</div>
+        </div>""",
+        unsafe_allow_html=True
+    )
     st.caption('Live weekly production board from SOS. Priority is per sales order, item lines are grouped underneath, and shipped rows are highlighted green.')
     st.caption('Use the full SOS Inventory workspace for detailed inventory investigation and deep sales-order checks.')
     st.caption('Weekly Production now prefers manual refresh for stability while you edit priorities.')
+
+    st.caption(f"Workflow state backend: {weekly_gsheet_backend_name()}")
+    if st.session_state.get("weekly_is_refreshing", False):
+        st.warning("Weekly board is updating from SOS...")
+    else:
+        st.caption(f"Weekly board status: idle | refresh limit: {weekly_get_refresh_limit()} SOs")
+
+    auto_refresh_tick = 0
+
+    auth_url = sos_build_auth_url()
+    client: Optional[SOSReadonlyClient] = None
+    try:
+        client, status_text = sos_get_authenticated_client()
+    except Exception as exc:
+        client = None
+        status_text = str(exc)
 
     with st.expander('Manual SOS sales-order search', expanded=False):
         ms1, ms2, ms3 = st.columns([2.2, 1.0, 1.0])
@@ -4119,21 +4141,6 @@ def render_weekly_production_workspace():
                     st.success(f'Found {manual_so_number.strip()} in SOS.')
                     st.dataframe(manual_so_df, use_container_width=True, hide_index=True)
 
-    st.caption(f"Workflow state backend: {weekly_gsheet_backend_name()}")
-    if st.session_state.get("weekly_is_refreshing", False):
-        st.warning("Weekly board is updating from SOS...")
-    else:
-        st.caption(f"Weekly board status: idle | refresh limit: {weekly_get_refresh_limit()} SOs")
-
-    auto_refresh_tick = 0
-
-    auth_url = sos_build_auth_url()
-    client: Optional[SOSReadonlyClient] = None
-    try:
-        client, status_text = sos_get_authenticated_client()
-    except Exception as exc:
-        client = None
-        status_text = str(exc)
 
     if 'weekly_prod_df' not in st.session_state:
         st.session_state['weekly_prod_df'] = weekly_production_empty_df()

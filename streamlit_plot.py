@@ -1,4 +1,4 @@
-# Rev AQ - shipment serials + customer PO for Nabtesco shipments
+# Rev AS_FULL - shipment serials + customer PO for Nabtesco shipments
 import io
 import base64
 import json
@@ -3961,7 +3961,7 @@ def weekly_resequence_priority_editor(previous_df: pd.DataFrame, edited_df: pd.D
     return out
 
 
-def weekly_apply_priority_change_inline(board_df: pd.DataFrame, edited_priority_rows: pd.DataFrame) -> pd.DataFrame:
+def weekly_apply_priority_change_inline(board_df: pd.DataFrame, edited_priority_rows: pd.DataFrame, save_changes: bool = True) -> pd.DataFrame:
     original_df = weekly_build_so_editor_df(board_df).copy().reset_index(drop=True)
     edited_df = edited_priority_rows.copy().reset_index(drop=True)
     resequenced_df = weekly_resequence_priority_editor(original_df, edited_df)
@@ -3975,7 +3975,8 @@ def weekly_apply_priority_change_inline(board_df: pd.DataFrame, edited_priority_
 
     board_df = weekly_apply_so_editor_df(board_df, resequenced_df)
     st.session_state["weekly_prod_df"] = board_df
-    weekly_save_priority_state_from_board(board_df)
+    if save_changes:
+        weekly_save_priority_state_from_board(board_df)
     return board_df
 
 
@@ -4067,11 +4068,27 @@ def weekly_render_active_orders_inline(board_df: pd.DataFrame) -> pd.DataFrame:
             so = str(edited_df.iloc[i].get("SO Number", "")).strip()
             if so in priority_values:
                 edited_df.at[i, "Priority"] = int(priority_values[so])
-        board_df = weekly_apply_priority_change_inline(board_df, edited_df)
-        st.success("Priority updated and auto-resequenced.")
-        st.rerun()
+        preview_board_df = weekly_apply_priority_change_inline(board_df.copy(), edited_df, save_changes=False)
+        st.info("Priority changes staged. Click 'Save priority changes' below to commit.")
+        if st.button("Save priority changes", key="weekly_save_priority_changes_btn", use_container_width=True):
+            weekly_save_priority_state_from_board(preview_board_df)
+            st.session_state["weekly_prod_df"] = preview_board_df
+            st.success("Priority updated and saved.")
+            return preview_board_df
+        return preview_board_df
 
     return board_df
+
+
+
+def weekly_manual_find_sales_order(client: Optional["SOSReadonlyClient"], so_number: str, explode: bool = False) -> pd.DataFrame:
+    so_number = str(so_number or "").strip()
+    if client is None or not so_number:
+        return pd.DataFrame()
+    try:
+        return sos_grouped_sales_order_dataframe(client, so_number, explode=explode)
+    except Exception:
+        return pd.DataFrame()
 
 
 def render_weekly_production_workspace():
@@ -4081,6 +4098,27 @@ def render_weekly_production_workspace():
     st.subheader('Weekly Production')
     st.caption('Live weekly production board from SOS. Priority is per sales order, item lines are grouped underneath, and shipped rows are highlighted green.')
     st.caption('Use the full SOS Inventory workspace for detailed inventory investigation and deep sales-order checks.')
+    st.caption('Weekly Production now prefers manual refresh for stability while you edit priorities.')
+
+    with st.expander('Manual SOS sales-order search', expanded=False):
+        ms1, ms2, ms3 = st.columns([2.2, 1.0, 1.0])
+        manual_so_number = ms1.text_input('Type a Sales Order number', key='weekly_manual_so_number', placeholder='SO-2026-160')
+        manual_explode = ms2.checkbox('Explode subassemblies', value=False, key='weekly_manual_so_explode')
+        manual_search_clicked = ms3.button('Search SOS now', key='weekly_manual_so_search_btn', use_container_width=True)
+        if manual_search_clicked:
+            if client is None:
+                st.error('SOS client is not available.')
+            elif not str(manual_so_number or '').strip():
+                st.warning('Type a Sales Order number first.')
+            else:
+                with st.spinner(f"Searching SOS for {manual_so_number.strip()}..."):
+                    manual_so_df = weekly_manual_find_sales_order(client, manual_so_number.strip(), explode=manual_explode)
+                if manual_so_df.empty:
+                    st.error(f'Could not find {manual_so_number.strip()} in SOS or no lines were returned.')
+                else:
+                    st.success(f'Found {manual_so_number.strip()} in SOS.')
+                    st.dataframe(manual_so_df, use_container_width=True, hide_index=True)
+
     st.caption(f"Workflow state backend: {weekly_gsheet_backend_name()}")
     if st.session_state.get("weekly_is_refreshing", False):
         st.warning("Weekly board is updating from SOS...")
@@ -4088,8 +4126,6 @@ def render_weekly_production_workspace():
         st.caption(f"Weekly board status: idle | refresh limit: {weekly_get_refresh_limit()} SOs")
 
     auto_refresh_tick = 0
-    if st.session_state.get('weekly_enable_auto_refresh', False) and not st.session_state.get('weekly_is_refreshing', False):
-        auto_refresh_tick = st_autorefresh(interval=180000, key='weekly_auto_refresh_tick')
 
     auth_url = sos_build_auth_url()
     client: Optional[SOSReadonlyClient] = None
@@ -4159,9 +4195,7 @@ def render_weekly_production_workspace():
     ctl1, ctl2, ctl3 = st.columns([1.4, 1.1, 1.1])
     refresh_feedback = st.container()
     refresh_clicked = ctl1.button('Refresh open sales orders', key='weekly_refresh_open', use_container_width=True)
-    auto_refresh_due = bool(auto_refresh_tick) and int(auto_refresh_tick) > 0
-    if auto_refresh_due and not refresh_clicked and client is not None and not st.session_state.get('weekly_is_refreshing', False):
-        refresh_clicked = True
+    auto_refresh_due = False
     if refresh_clicked:
         st.session_state['weekly_refresh_status'] = ''
         st.session_state['weekly_refresh_error'] = ''
@@ -4244,12 +4278,10 @@ def render_weekly_production_workspace():
             st.session_state["weekly_prod_df"] = weekly_apply_ignore_filters(st.session_state.get("weekly_prod_df"))
             st.session_state["weekly_refresh_status"] = f"SO {ignore_so_input} added to ignore list."
             st.session_state["weekly_refresh_error"] = ""
-            st.rerun()
     if ig2.button("Clear ignore list", key="weekly_clear_ignore_so_btn", use_container_width=True):
         weekly_save_ignored_sos([])
         st.session_state["weekly_refresh_status"] = "Ignore list cleared."
         st.session_state["weekly_refresh_error"] = ""
-        st.rerun()
 
     with st.expander('Optional manual add / load', expanded=False):
         left, right = st.columns([1.3, 1.7])
@@ -4750,7 +4782,7 @@ def inject_branding():
             background-image: url("data:image/png;base64,{LOGO_B64}");
             background-repeat: no-repeat;
             background-size: contain;
-            background-position: center;
+            background-position: right 2rem top 8rem;
             opacity: 0.07;
             pointer-events: none;
             z-index: 0;

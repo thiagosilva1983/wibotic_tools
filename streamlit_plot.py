@@ -1,4 +1,4 @@
-# Rev AS_FULL - shipment serials + customer PO for Nabtesco shipments
+# Rev J - shipment serials + customer PO for Nabtesco shipments
 import io
 import base64
 import json

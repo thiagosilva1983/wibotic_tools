@@ -1,4 +1,4 @@
-# Rev AU_full - shipment serials + customer PO for Nabtesco shipments
+# Rev AU - shipment serials + customer PO for Nabtesco shipments
 import io
 import base64
 import json
@@ -4786,10 +4786,7 @@ def inject_branding():
             transform: translate(-50%, -42%);
             width: min(44vw, 620px);
             height: min(44vw, 620px);
-            background-image: url("data:image/png;base64,{LOGO_B64}");
             background-repeat: no-repeat;
-            background-size: contain;
-            background-position: right 2rem top 8rem;
             opacity: 0.07;
             pointer-events: none;
             z-index: 0;

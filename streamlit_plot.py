@@ -1,4 +1,4 @@
-# Rev REv BA - production_AW_full.py
+# Rev BA - production_AW_full.py
 import io
 import base64
 import json
@@ -4189,8 +4189,6 @@ def weekly_render_active_orders_inline(board_df: pd.DataFrame) -> pd.DataFrame:
         st.info("No rows to show.")
         return board_df
 
-    priority_values = {}
-
     widths = [0.8, 1.8, 1.9, 1.2, 4.0, 1.0, 1.0, 1.0, 1.1]
     header_cols = st.columns(widths)
     header_names = ["Priority", "Customer", "SO Number", "Buildable", "Product", "QTY Ordered", "QTY Shipped", "QTY Invoiced", "QTY Remaining"]
@@ -4215,16 +4213,11 @@ def weekly_render_active_orders_inline(board_df: pd.DataFrame) -> pd.DataFrame:
         so = str(row.get("SO Number", "") or "").strip()
 
         if is_header:
-            original_priority = int(pd.to_numeric(row.get("Priority", 0), errors="coerce") or 0)
-            new_priority = row_cols[0].number_input(
-                "Priority",
-                min_value=1,
-                value=max(1, original_priority),
-                step=1,
-                key=f"weekly_inline_priority_{so}",
-                label_visibility="collapsed",
+            priority_text = str(int(pd.to_numeric(row.get("Priority", 0), errors="coerce") or 0))
+            row_cols[0].markdown(
+                f"<div style='background:{bg}; padding:0.45rem 0.5rem; border-radius:0.15rem; font-weight:700; min-height:2.4rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;'>{priority_text}</div>",
+                unsafe_allow_html=True,
             )
-            priority_values[so] = int(new_priority)
 
             vals = [
                 str(row.get("Customer", "") or ""),
@@ -4261,16 +4254,7 @@ def weekly_render_active_orders_inline(board_df: pd.DataFrame) -> pd.DataFrame:
                     unsafe_allow_html=True,
                 )
 
-    if st.button("Save Inline Priorities", use_container_width=True):
-        editor_df = weekly_build_so_editor_df(board_df).copy()
-        editor_df["Priority"] = editor_df["SO Number"].astype(str).map(
-            lambda so: priority_values.get(str(so).strip(), 999999)
-        )
-        editor_df = weekly_normalize_priority_editor_df(editor_df)
-        board_df = weekly_apply_priority_change_inline(board_df, editor_df, save_changes=True)
-        st.session_state['weekly_priority_editor_work_df'] = weekly_build_so_editor_df(board_df)[['Priority', 'SO Number', 'Customer', 'Buildable']].copy()
-        st.success("Inline priorities saved with unique numbers.")
-        st.rerun()
+    st.caption("Edit priorities in the Smart Priority Assistant above. Active Open Orders below is view-only so duplicate numbers cannot appear here.")
 
     return board_df
 def weekly_manual_find_sales_order(client: Optional["SOSReadonlyClient"], so_number: str, explode: bool = False) -> pd.DataFrame:

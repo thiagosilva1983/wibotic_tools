@@ -1,4 +1,4 @@
-# Rev bg - production_AW_full.py
+# Rev BH - production_AW_full.py
 import io
 import base64
 import json
@@ -45,7 +45,7 @@ except Exception:
     Credentials = None
     GSPREAD_AVAILABLE = False
 
-st.set_page_config(page_title='Wibotic Weekly Production | SOS Inventory | Label Studio', layout='wide')
+st.set_page_config(page_title='Wibotic Weekly Production | SOS Inventory | Label Studio | AI Assistant', layout='wide')
 
 st.markdown("""
 <style>
@@ -4741,7 +4741,7 @@ def render_weekly_production_workspace():
 
 
 def render_workspace_selector():
-    options = ['Label Studio', 'SOS Inventory', 'Weekly Production']
+    options = ['Label Studio', 'SOS Inventory', 'Weekly Production', 'AI Assistant']
     selected = st.radio(
         'Workspace',
         options,
@@ -4751,6 +4751,203 @@ def render_workspace_selector():
         label_visibility='collapsed',
     )
     return selected
+
+
+
+def _read_secret_value(name: str, default: str = '') -> str:
+    try:
+        value = st.secrets.get(name, default)
+        if value is None:
+            value = default
+        return str(value)
+    except Exception:
+        return str(os.environ.get(name, default) or default)
+
+
+
+def _extract_response_text(data: Dict[str, Any]) -> str:
+    text_value = data.get('output_text')
+    if isinstance(text_value, str) and text_value.strip():
+        return text_value.strip()
+    parts: List[str] = []
+    for item in data.get('output', []) or []:
+        if item.get('type') != 'message':
+            continue
+        for content in item.get('content', []) or []:
+            if content.get('type') in ('output_text', 'text'):
+                part = content.get('text', '')
+                if isinstance(part, str) and part.strip():
+                    parts.append(part.strip())
+    return '\n\n'.join(parts).strip()
+
+
+
+def _json_safe_value(value):
+    if pd.isna(value):
+        return ''
+    if isinstance(value, pd.Timestamp):
+        return str(value)
+    return value
+
+
+
+def build_ai_context_snapshot() -> Dict[str, Any]:
+    context: Dict[str, Any] = {
+        'generated_at': str(pd.Timestamp.now()),
+        'notes': 'Context generated from the current Streamlit session state. Read-only guidance only.',
+    }
+    board_df = st.session_state.get('weekly_prod_df')
+    if isinstance(board_df, pd.DataFrame) and not board_df.empty:
+        preferred_cols = [
+            'Priority', 'Customer', 'SO Number', 'Buildable', 'Product',
+            'QTY Ordered', 'QTY Shipped', 'QTY Invoiced', 'QTY Remaining',
+            'Part Number', 'Name/Description', 'Location', 'Notes'
+        ]
+        available_cols = [c for c in preferred_cols if c in board_df.columns]
+        if not available_cols:
+            available_cols = board_df.columns.tolist()[:10]
+        snapshot_df = board_df[available_cols].copy().head(80)
+        snapshot_df = snapshot_df.applymap(_json_safe_value)
+        context['active_open_orders_count'] = int(len(board_df))
+        context['active_open_orders'] = snapshot_df.to_dict(orient='records')
+    else:
+        context['active_open_orders_count'] = 0
+        context['active_open_orders'] = []
+
+    shipped_df = st.session_state.get('weekly_shipped_df')
+    if isinstance(shipped_df, pd.DataFrame) and not shipped_df.empty:
+        available_cols = [c for c in ['Priority', 'Customer', 'SO Number', 'Product', 'QTY Shipped'] if c in shipped_df.columns]
+        context['shipped_this_week'] = shipped_df[available_cols].head(40).applymap(_json_safe_value).to_dict(orient='records')
+    else:
+        context['shipped_this_week'] = []
+
+    closed_df = st.session_state.get('weekly_closed_df')
+    if isinstance(closed_df, pd.DataFrame) and not closed_df.empty:
+        available_cols = [c for c in ['Customer', 'SO Number', 'Product'] if c in closed_df.columns]
+        context['closed_completed_this_week'] = closed_df[available_cols].head(40).applymap(_json_safe_value).to_dict(orient='records')
+    else:
+        context['closed_completed_this_week'] = []
+
+    return context
+
+
+
+def ask_openai_production_assistant(question: str, context: Dict[str, Any], model: str) -> str:
+    api_key = _read_secret_value('OPENAI_API_KEY', '')
+    if not api_key:
+        raise ValueError('Missing OPENAI_API_KEY in Streamlit secrets or environment variables.')
+    system_prompt = (
+        'You are a read-only production planning assistant inside a Streamlit app. '
+        'Use only the provided JSON context. Do not invent missing inventory data. '
+        'Be concise, practical, and explicit about uncertainty. '
+        'Never claim that you changed priorities, inventory, or SOS data. '
+        'When useful, mention specific sales orders.'
+    )
+    user_prompt = (
+        f'User question:\n{question.strip()}\n\n'
+        'Session context JSON:\n'
+        f'{json.dumps(context, indent=2, default=str)}'
+    )
+    payload = {
+        'model': model,
+        'input': [
+            {
+                'role': 'system',
+                'content': [
+                    {'type': 'input_text', 'text': system_prompt}
+                ],
+            },
+            {
+                'role': 'user',
+                'content': [
+                    {'type': 'input_text', 'text': user_prompt}
+                ],
+            },
+        ],
+        'max_output_tokens': 900,
+    }
+    response = requests.post(
+        'https://api.openai.com/v1/responses',
+        headers={
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json',
+        },
+        json=payload,
+        timeout=90,
+    )
+    response.raise_for_status()
+    data = response.json()
+    answer = _extract_response_text(data)
+    if not answer:
+        raise ValueError('The AI response came back empty.')
+    return answer
+
+
+
+def render_ai_workspace():
+    st.subheader('AI Assistant')
+    st.caption('This runs inside the same Streamlit app as a read-only production helper. It uses the current weekly production board from session state and does not write back to SOS or change priorities.')
+    api_key = _read_secret_value('OPENAI_API_KEY', '')
+    model_default = _read_secret_value('OPENAI_MODEL', 'gpt-4.1-mini')
+
+    c1, c2, c3 = st.columns([1, 1, 2])
+    c1.metric('AI key', 'Ready' if api_key else 'Missing')
+    board_df = st.session_state.get('weekly_prod_df')
+    c2.metric('Active orders', len(board_df) if isinstance(board_df, pd.DataFrame) else 0)
+    with c3.expander('Hosted secrets template'):
+        st.code('''OPENAI_API_KEY="..."\nOPENAI_MODEL="gpt-4.1-mini"''', language='toml')
+
+    if not api_key:
+        st.warning('Add OPENAI_API_KEY to Streamlit secrets first. After that, this assistant will work inside this same app.')
+
+    suggested_questions = [
+        'Summarize the active open orders for production today.',
+        'Which sales orders look most buildable right now?',
+        'Which active orders might be blocked or risky?',
+        'Give me a short manager update for this week.',
+    ]
+
+    st.markdown('#### Quick prompts')
+    prompt_cols = st.columns(len(suggested_questions))
+    for idx, prompt in enumerate(suggested_questions):
+        if prompt_cols[idx].button(prompt, key=f'ai_prompt_{idx}', use_container_width=True):
+            st.session_state['ai_question_draft'] = prompt
+
+    with st.form('ai_assistant_form'):
+        model_name = st.text_input('Model', value=st.session_state.get('ai_model_name', model_default) or model_default)
+        question = st.text_area(
+            'Ask the production assistant',
+            value=st.session_state.get('ai_question_draft', ''),
+            height=140,
+            placeholder='Example: Which orders should production focus on first based on the current active board?'
+        )
+        include_context = st.checkbox('Show compact JSON context used for the answer', value=False)
+        submitted = st.form_submit_button('Ask AI', use_container_width=True)
+
+    context = build_ai_context_snapshot()
+    if include_context:
+        with st.expander('Context sent to the AI', expanded=False):
+            st.json(context)
+
+    if submitted:
+        st.session_state['ai_model_name'] = model_name.strip() or model_default
+        st.session_state['ai_question_draft'] = question
+        if not question.strip():
+            st.warning('Enter a question first.')
+        elif not api_key:
+            st.error('OPENAI_API_KEY is missing in Streamlit secrets.')
+        else:
+            try:
+                with st.spinner('Thinking...'):
+                    answer = ask_openai_production_assistant(question, context, st.session_state['ai_model_name'])
+                st.session_state['ai_last_answer'] = answer
+            except Exception as exc:
+                st.error(f'AI request failed: {exc}')
+
+    if st.session_state.get('ai_last_answer'):
+        st.markdown('#### Answer')
+        st.write(st.session_state['ai_last_answer'])
+
 
 
 
@@ -4938,7 +5135,7 @@ def _workspace_intro(title, description=''):
 
 def render_app_header():
     st.markdown("## WiBotic Production")
-    st.caption("Weekly Production, SOS Inventory, and Label Studio in one Streamlit app.")
+    st.caption("Weekly Production, SOS Inventory, Label Studio, and AI Assistant in one Streamlit app.")
 
 
 # -----------------------------
@@ -5538,5 +5735,7 @@ if active_workspace == 'Label Studio':
     render_label_tab()
 elif active_workspace == 'SOS Inventory':
     render_sos_workspace()
+elif active_workspace == 'AI Assistant':
+    render_ai_workspace()
 else:
     render_weekly_production_workspace()

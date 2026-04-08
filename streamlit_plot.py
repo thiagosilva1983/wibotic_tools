@@ -1,4 +1,4 @@
-# Rev BD - production_AW_full.py
+# Rev BE - production_AW_full.py
 import io
 import base64
 import json
@@ -4524,9 +4524,11 @@ def render_weekly_production_workspace():
     if 'weekly_inventory_last_fetch_text' not in st.session_state:
         st.session_state['weekly_inventory_last_fetch_text'] = ''
 
-    sales_orders = [so for so in reorder_map.values() if str(so).strip()]
-    default_inventory_so = selected_so if selected_so else (sales_orders[0] if sales_orders else '')
-    inventory_so_number = default_inventory_so
+    sales_orders = []
+    if not board_df.empty and 'SO Number' in board_df.columns:
+        sales_orders = [so for so in board_df['SO Number'].fillna('').astype(str).tolist() if str(so).strip()]
+        sales_orders = list(dict.fromkeys(sales_orders))
+    inventory_so_number = sales_orders[0] if sales_orders else ''
 
     if 'weekly_inventory_view_mode' not in st.session_state:
         st.session_state['weekly_inventory_view_mode'] = 'split'

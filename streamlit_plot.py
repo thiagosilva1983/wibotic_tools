@@ -3024,15 +3024,140 @@ def weekly_prod_apply_so_overrides(df: pd.DataFrame, overrides: Dict[str, Dict[s
     return weekly_production_reset_priorities(out, weekly_sort_so_numbers(list(dict.fromkeys(out['SO Number'].astype(str).tolist())), [so for so, ov in sorted(overrides.items(), key=lambda kv: int(kv[1].get('Priority', 999999) or 999999))]))
 
 
+def weekly_extract_so_rank(so_value: Any) -> Tuple[int, str]:
+    so_text = str(so_value or '').strip()
+    if not so_text:
+        return (999999, '')
+    match = re.search(r'(\d+)(?!.*\d)', so_text)
+    if match:
+        try:
+            return (int(match.group(1)), so_text)
+        except Exception:
+            return (999999, so_text)
+    return (999999, so_text)
+
+
+def weekly_buildable_quick_view_map() -> Dict[str, Dict[str, Any]]:
+    result: Dict[str, Dict[str, Any]] = {}
+    inv_df = pd.DataFrame(st.session_state.get('weekly_inventory_result_df', pd.DataFrame())).copy()
+    so_number = str(st.session_state.get('weekly_inventory_result_so', '') or '').strip()
+    if inv_df.empty or not so_number:
+        return result
+    try:
+        alloc_df = weekly_alloc_apply(inv_df, weekly_alloc_load_df(), so_number)
+    except Exception:
+        alloc_df = inv_df.copy()
+
+    buildable_qty = 0
+    requested_qty = 0
+    if 'Net Buildable Qty' in alloc_df.columns:
+        buildable_qty = int(pd.to_numeric(alloc_df.get('Net Buildable Qty', 0), errors='coerce').fillna(0).min())
+    elif 'Buildable Qty' in alloc_df.columns:
+        buildable_qty = int(pd.to_numeric(alloc_df.get('Buildable Qty', 0), errors='coerce').fillna(0).min())
+    if 'Needed' in alloc_df.columns:
+        requested_qty = int(pd.to_numeric(alloc_df.get('Needed', 0), errors='coerce').fillna(0).max())
+    elif 'QTY Remaining' in alloc_df.columns:
+        requested_qty = int(pd.to_numeric(alloc_df.get('QTY Remaining', 0), errors='coerce').fillna(0).max())
+
+    if requested_qty > 0:
+        if buildable_qty >= requested_qty:
+            status = f'YES {buildable_qty}/{requested_qty}'
+        elif buildable_qty > 0:
+            status = f'PARTIAL {buildable_qty}/{requested_qty}'
+        else:
+            status = f'NO 0/{requested_qty}'
+    else:
+        status = str(buildable_qty)
+
+    result[so_number] = {
+        'buildable_qty': buildable_qty,
+        'requested_qty': requested_qty,
+        'buildable_text': status,
+    }
+    return result
+
+
+def weekly_build_smart_priority_df(board_df: pd.DataFrame) -> pd.DataFrame:
+    base_df = weekly_build_so_editor_df(board_df).copy().reset_index(drop=True)
+    if base_df.empty:
+        return base_df
+
+    buildable_map = weekly_buildable_quick_view_map()
+    strategic_customer_weights = {
+        'GM': 40,
+        'Tesla': 35,
+        'Ghost Robotics': 30,
+        'Nabtesco Corporation - CVC Promotion Dept.': 25,
+    }
+
+    scored_rows = []
+    for _, row in base_df.iterrows():
+        so = str(row.get('SO Number', '') or '').strip()
+        customer = str(row.get('Customer', '') or '').strip()
+        current_priority = int(pd.to_numeric(row.get('Priority', 999999), errors='coerce') or 999999)
+        block = board_df[board_df['SO Number'].astype(str) == so].copy()
+        remaining_qty = int(pd.to_numeric(block.get('QTY Remaining', 0), errors='coerce').fillna(0).sum()) if not block.empty else 0
+        shipped_complete = bool(block.apply(_is_fully_shipped_row, axis=1).all()) if not block.empty else False
+
+        buildable_info = buildable_map.get(so, {})
+        buildable_qty = int(buildable_info.get('buildable_qty', 0) or 0)
+        buildable_text = str(buildable_info.get('buildable_text', '—') or '—')
+
+        buildable_score = 0
+        if remaining_qty > 0 and buildable_qty >= remaining_qty:
+            buildable_score = 100
+        elif buildable_qty > 0:
+            buildable_score = 50
+
+        customer_score = int(strategic_customer_weights.get(customer, 0) or 0)
+
+        if shipped_complete:
+            buildable_score = -1000
+
+        scored_rows.append({
+            'Priority': current_priority,
+            'SO Number': so,
+            'Customer': customer,
+            'Buildable': buildable_text,
+            '_current_priority': current_priority,
+            '_smart_score': buildable_score + customer_score,
+            '_so_rank': weekly_extract_so_rank(so)[0],
+        })
+
+    smart_df = pd.DataFrame(scored_rows)
+    smart_df = smart_df.sort_values(
+        by=['_smart_score', '_current_priority', '_so_rank', 'SO Number'],
+        ascending=[False, True, True, True],
+        kind='stable',
+    ).reset_index(drop=True)
+    smart_df['Priority'] = range(1, len(smart_df) + 1)
+    return smart_df
+
+
+def weekly_normalize_priority_editor_df(priority_df: pd.DataFrame) -> pd.DataFrame:
+    work = pd.DataFrame(priority_df).copy()
+    if work.empty:
+        return work
+    work['SO Number'] = work['SO Number'].astype(str).str.strip()
+    work['Priority'] = pd.to_numeric(work.get('Priority', 999999), errors='coerce').fillna(999999).astype(int)
+    work['_so_rank'] = work['SO Number'].map(lambda x: weekly_extract_so_rank(x)[0])
+    work = work.sort_values(['Priority', '_so_rank', 'SO Number'], kind='stable').drop(columns=['_so_rank']).reset_index(drop=True)
+    work['Priority'] = range(1, len(work) + 1)
+    return work
+
+
 def weekly_build_so_editor_df(board_df: pd.DataFrame) -> pd.DataFrame:
     board_df = weekly_production_normalize_df(board_df)
+    buildable_map = weekly_buildable_quick_view_map()
     rows = []
     for so, block in board_df.groupby('SO Number', sort=False):
         first = block.iloc[0]
+        buildable_info = buildable_map.get(str(so).strip(), {})
         rows.append({
             'Priority': int(first.get('Priority', 0) or 0),
             'Customer': first.get('Customer', ''),
             'SO Number': so,
+            'Buildable': str(buildable_info.get('buildable_text', '—') or '—'),
             'Status': first.get('Status', ''),
             'Assigned To': first.get('Assigned To', ''),
             'Blocker': first.get('Blocker', ''),
@@ -3041,17 +3166,14 @@ def weekly_build_so_editor_df(board_df: pd.DataFrame) -> pd.DataFrame:
             'Last Updated At': first.get('Last Updated At', ''),
         })
     return pd.DataFrame(rows)
-
-
 def weekly_apply_so_editor_df(board_df: pd.DataFrame, so_editor_df: pd.DataFrame) -> pd.DataFrame:
     board_df = weekly_production_normalize_df(board_df)
     if board_df.empty:
         return board_df
     if so_editor_df is None or len(so_editor_df) == 0:
         return board_df
-    work = so_editor_df.copy()
-    work['Priority'] = pd.to_numeric(work['Priority'], errors='coerce').fillna(0).astype(int)
-    ordered = work.sort_values(['Priority', 'SO Number'], kind='stable')['SO Number'].astype(str).tolist()
+    work = weekly_normalize_priority_editor_df(so_editor_df)
+    ordered = work['SO Number'].astype(str).tolist()
     overrides = {}
     for _, row in work.iterrows():
         so = str(row.get('SO Number', '') or '').strip()
@@ -3068,6 +3190,7 @@ def weekly_apply_so_editor_df(board_df: pd.DataFrame, so_editor_df: pd.DataFrame
             'Last Updated At': str(row.get('Last Updated At', '') or ''),
         }
     out = weekly_prod_apply_so_overrides(board_df, overrides)
+    return weekly_production_reset_priorities(out, ordered)
     return weekly_production_reset_priorities(out, ordered)
 
 
@@ -3626,17 +3749,20 @@ def _is_fully_shipped_row(row: pd.Series) -> bool:
 
 def weekly_prepare_display_df(board_df: pd.DataFrame) -> pd.DataFrame:
     board_df = weekly_production_normalize_df(board_df)
-    cols = ['Priority', 'Customer', 'SO Number', 'Product', 'QTY Ordered', 'QTY Shipped', 'QTY Invoiced', 'QTY Remaining', 'Status', 'Assigned To', 'Blocker', 'Notes']
+    buildable_map = weekly_buildable_quick_view_map()
+    cols = ['Priority', 'Customer', 'SO Number', 'Buildable', 'Product', 'QTY Ordered', 'QTY Shipped', 'QTY Invoiced', 'QTY Remaining', 'Status', 'Assigned To', 'Blocker', 'Notes']
     if board_df.empty:
         return pd.DataFrame(columns=cols)
     display_rows: List[Dict[str, Any]] = []
     for so, block in board_df.groupby('SO Number', sort=False):
         first = block.iloc[0]
+        buildable_info = buildable_map.get(str(so).strip(), {})
         header_complete = bool(block.apply(_is_fully_shipped_row, axis=1).all())
         display_rows.append({
             'Priority': first.get('Priority', ''),
             'Customer': first.get('Customer', ''),
             'SO Number': so,
+            'Buildable': str(buildable_info.get('buildable_text', '—') or '—'),
             'Product': '',
             'QTY Ordered': int(pd.to_numeric(block['QTY Ordered'], errors='coerce').fillna(0).sum()),
             'QTY Shipped': int(pd.to_numeric(block['QTY Shipped'], errors='coerce').fillna(0).sum()),
@@ -3656,6 +3782,7 @@ def weekly_prepare_display_df(board_df: pd.DataFrame) -> pd.DataFrame:
                 'Priority': '',
                 'Customer': '',
                 'SO Number': '',
+                'Buildable': '',
                 'Product': row.get('Product', ''),
                 'QTY Ordered': row.get('QTY Ordered', 0),
                 'QTY Shipped': row.get('QTY Shipped', 0),
@@ -3670,8 +3797,6 @@ def weekly_prepare_display_df(board_df: pd.DataFrame) -> pd.DataFrame:
                 '_header_complete': False,
             })
     return pd.DataFrame(display_rows)
-
-
 def weekly_render_display_table(board_df: pd.DataFrame, title: str, force_green: bool = False) -> None:
     st.markdown(f'#### {title}')
     display_df = weekly_prepare_display_df(board_df)
@@ -3924,7 +4049,7 @@ def weekly_resequence_priority_editor(previous_df: pd.DataFrame, edited_df: pd.D
     prev = previous_df.copy().reset_index(drop=True)
     edited = edited_df.copy().reset_index(drop=True)
     if prev.empty or edited.empty or "SO Number" not in prev.columns:
-        return edited
+        return weekly_normalize_priority_editor_df(edited)
 
     prev["Priority"] = pd.to_numeric(prev.get("Priority", 0), errors="coerce").fillna(0).astype(int)
     edited["Priority"] = pd.to_numeric(edited.get("Priority", 0), errors="coerce").fillna(0).astype(int)
@@ -3942,9 +4067,7 @@ def weekly_resequence_priority_editor(previous_df: pd.DataFrame, edited_df: pd.D
             changed_rows.append((prev_so, new_pr))
 
     if not changed_rows:
-        out = edited.copy()
-        out["Priority"] = range(1, len(out) + 1)
-        return out
+        return weekly_normalize_priority_editor_df(edited)
 
     so_order = prev_order[:]
     for changed_so, new_priority in changed_rows:
@@ -3958,9 +4081,7 @@ def weekly_resequence_priority_editor(previous_df: pd.DataFrame, edited_df: pd.D
     out["_sort_rank"] = out["SO Number"].astype(str).map(rank_map).fillna(999999).astype(int)
     out = out.sort_values(["_sort_rank"], kind="stable").drop(columns=["_sort_rank"]).reset_index(drop=True)
     out["Priority"] = range(1, len(out) + 1)
-    return out
-
-
+    return weekly_normalize_priority_editor_df(out)
 def weekly_apply_priority_change_inline(board_df: pd.DataFrame, edited_priority_rows: pd.DataFrame, save_changes: bool = True) -> pd.DataFrame:
     original_df = weekly_build_so_editor_df(board_df).copy().reset_index(drop=True)
     edited_df = edited_priority_rows.copy().reset_index(drop=True)
@@ -3982,22 +4103,44 @@ def weekly_apply_priority_change_inline(board_df: pd.DataFrame, edited_priority_
 
 def weekly_render_active_orders_inline(board_df: pd.DataFrame) -> pd.DataFrame:
     board_df = weekly_production_normalize_df(board_df)
-    st.markdown("### Smart Priority Editor")
-    priority_df = weekly_build_so_editor_df(board_df).copy()
-    if not priority_df.empty:
-        priority_df = priority_df[['Priority', 'SO Number', 'Customer']]
+    st.markdown("### Smart Priority Assistant")
+    st.caption("Simple start: unique priorities only, with buildable quick view when an SOS inventory result is already loaded.")
+
+    current_editor_df = weekly_build_so_editor_df(board_df).copy()
+    if not current_editor_df.empty:
+        base_editor_df = current_editor_df[['Priority', 'SO Number', 'Customer', 'Buildable']].copy()
+        smart_editor_df = weekly_build_smart_priority_df(board_df)
+        smart_editor_df = smart_editor_df[['Priority', 'SO Number', 'Customer', 'Buildable']].copy() if not smart_editor_df.empty else base_editor_df.copy()
+
+        if 'weekly_priority_editor_work_df' not in st.session_state:
+            st.session_state['weekly_priority_editor_work_df'] = base_editor_df.copy()
+
+        a1, a2, a3 = st.columns([1.2, 1.2, 2.6])
+        if a1.button("Suggest Smart Priority", use_container_width=True):
+            st.session_state['weekly_priority_editor_work_df'] = smart_editor_df.copy()
+        if a2.button("Reset Current Order", use_container_width=True):
+            st.session_state['weekly_priority_editor_work_df'] = base_editor_df.copy()
+        a3.caption("Save will always resequence to 1, 2, 3... so duplicated numbers cannot happen.")
+
+        editor_source_df = pd.DataFrame(st.session_state.get('weekly_priority_editor_work_df', base_editor_df)).copy()
+        editor_source_df = weekly_normalize_priority_editor_df(editor_source_df)
         edited_priority_df = st.data_editor(
-            priority_df,
+            editor_source_df,
             use_container_width=True,
             num_rows="fixed",
-            key="weekly_priority_table_editor"
+            key="weekly_priority_table_editor",
+            disabled=['SO Number', 'Customer', 'Buildable'],
+            column_config={
+                'Priority': st.column_config.NumberColumn('Priority', min_value=1, step=1),
+                'SO Number': st.column_config.TextColumn('SO Number'),
+                'Customer': st.column_config.TextColumn('Customer'),
+                'Buildable': st.column_config.TextColumn('Buildable'),
+            },
         )
 
         if st.button("Save Smart Priority", use_container_width=True):
-            edited_priority_df = pd.DataFrame(edited_priority_df).copy()
-            edited_priority_df['Priority'] = pd.to_numeric(edited_priority_df['Priority'], errors='coerce').fillna(999999)
-            edited_priority_df = edited_priority_df.sort_values(['Priority', 'SO Number'], kind='stable').reset_index(drop=True)
-            edited_priority_df["Priority"] = range(1, len(edited_priority_df) + 1)
+            edited_priority_df = weekly_normalize_priority_editor_df(pd.DataFrame(edited_priority_df).copy())
+            st.session_state['weekly_priority_editor_work_df'] = edited_priority_df.copy()
 
             full_editor_df = weekly_build_so_editor_df(board_df).copy()
             full_editor_df = full_editor_df.merge(
@@ -4013,7 +4156,7 @@ def weekly_render_active_orders_inline(board_df: pd.DataFrame) -> pd.DataFrame:
             board_df = weekly_apply_so_editor_df(board_df, full_editor_df)
             st.session_state["weekly_prod_df"] = board_df
             weekly_save_priority_state_from_board(board_df)
-            st.success("Smart priority saved.")
+            st.success("Smart priority saved with unique numbers.")
 
     st.markdown("### Active Open Orders")
     display_df = weekly_prepare_display_df(board_df)
@@ -4021,13 +4164,11 @@ def weekly_render_active_orders_inline(board_df: pd.DataFrame) -> pd.DataFrame:
         st.info("No rows to show.")
         return board_df
 
-    so_editor_df = weekly_build_so_editor_df(board_df).copy().reset_index(drop=True)
     priority_values = {}
-    original_priority_values = {}
 
-    widths = [0.8, 1.8, 1.9, 4.6, 1.0, 1.0, 1.0, 1.1]
+    widths = [0.8, 1.8, 1.9, 1.2, 4.0, 1.0, 1.0, 1.0, 1.1]
     header_cols = st.columns(widths)
-    header_names = ["Priority", "Customer", "SO Number", "Product", "QTY Ordered", "QTY Shipped", "QTY Invoiced", "QTY Remaining"]
+    header_names = ["Priority", "Customer", "SO Number", "Buildable", "Product", "QTY Ordered", "QTY Shipped", "QTY Invoiced", "QTY Remaining"]
     for col_obj, name in zip(header_cols, header_names):
         col_obj.markdown(f"**{name}**")
 
@@ -4050,7 +4191,6 @@ def weekly_render_active_orders_inline(board_df: pd.DataFrame) -> pd.DataFrame:
 
         if is_header:
             original_priority = int(pd.to_numeric(row.get("Priority", 0), errors="coerce") or 0)
-            original_priority_values[so] = original_priority
             new_priority = row_cols[0].number_input(
                 "Priority",
                 min_value=1,
@@ -4064,6 +4204,7 @@ def weekly_render_active_orders_inline(board_df: pd.DataFrame) -> pd.DataFrame:
             vals = [
                 str(row.get("Customer", "") or ""),
                 so,
+                str(row.get("Buildable", "—") or "—"),
                 "",
                 str(int(pd.to_numeric(row.get("QTY Ordered", 0), errors="coerce") or 0)),
                 str(int(pd.to_numeric(row.get("QTY Shipped", 0), errors="coerce") or 0)),
@@ -4081,34 +4222,30 @@ def weekly_render_active_orders_inline(board_df: pd.DataFrame) -> pd.DataFrame:
                 "",
                 "",
                 "",
+                "",
                 str(row.get("Product", "") or ""),
-                str(int(pd.to_numeric(row.get("QTY Ordered", 0), errors='coerce') or 0)) if str(row.get("QTY Ordered", "")).strip() else "",
-                str(int(pd.to_numeric(row.get("QTY Shipped", 0), errors='coerce') or 0)) if str(row.get("QTY Shipped", "")).strip() else "",
-                str(int(pd.to_numeric(row.get("QTY Invoiced", 0), errors='coerce') or 0)) if str(row.get("QTY Invoiced", "")).strip() else "",
-                str(int(pd.to_numeric(row.get("QTY Remaining", 0), errors='coerce') or 0)) if str(row.get("QTY Remaining", "")).strip() else "",
+                str(int(pd.to_numeric(row.get("QTY Ordered", 0), errors="coerce") or 0)),
+                str(int(pd.to_numeric(row.get("QTY Shipped", 0), errors="coerce") or 0)),
+                str(int(pd.to_numeric(row.get("QTY Invoiced", 0), errors="coerce") or 0)),
+                str(int(pd.to_numeric(row.get("QTY Remaining", 0), errors="coerce") or 0)),
             ]
             for cobj, value in zip(row_cols, vals):
                 safe_value = str(value).replace("'", "&#39;")
                 cobj.markdown(
-                    f"<div style='background:{bg}; padding:0.45rem 0.5rem; border-radius:0.15rem; min-height:2.35rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;' title='{safe_value}'>{safe_value}</div>",
+                    f"<div style='background:{bg}; padding:0.35rem 0.45rem; border-radius:0.15rem; min-height:2.15rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;' title='{safe_value}'>{safe_value}</div>",
                     unsafe_allow_html=True,
                 )
 
-    changed = any(priority_values.get(so) != original_priority_values.get(so) for so in priority_values)
-    if changed:
-        edited_df = so_editor_df.copy()
-        for i in range(len(edited_df)):
-            so = str(edited_df.iloc[i].get("SO Number", "")).strip()
-            if so in priority_values:
-                edited_df.at[i, "Priority"] = int(priority_values[so])
-        preview_board_df = weekly_apply_priority_change_inline(board_df.copy(), edited_df, save_changes=False)
-        st.info("Priority changes staged. Click 'Save priority changes' below to commit.")
-        if st.button("Save priority changes", key="weekly_save_priority_changes_btn", use_container_width=True):
-            weekly_save_priority_state_from_board(preview_board_df)
-            st.session_state["weekly_prod_df"] = preview_board_df
-            st.success("Priority updated and saved.")
-            return preview_board_df
-        return preview_board_df
+    if st.button("Save Inline Priorities", use_container_width=True):
+        editor_df = weekly_build_so_editor_df(board_df).copy()
+        editor_df["Priority"] = editor_df["SO Number"].astype(str).map(
+            lambda so: priority_values.get(str(so).strip(), 999999)
+        )
+        editor_df = weekly_normalize_priority_editor_df(editor_df)
+        board_df = weekly_apply_priority_change_inline(board_df, editor_df, save_changes=True)
+        st.session_state['weekly_priority_editor_work_df'] = weekly_build_so_editor_df(board_df)[['Priority', 'SO Number', 'Customer', 'Buildable']].copy()
+        st.success("Inline priorities saved with unique numbers.")
+        st.rerun()
 
     return board_df
 def weekly_manual_find_sales_order(client: Optional["SOSReadonlyClient"], so_number: str, explode: bool = False) -> pd.DataFrame:

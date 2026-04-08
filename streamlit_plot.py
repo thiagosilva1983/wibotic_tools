@@ -1,4 +1,4 @@
-# Rev AW - production_AW_full.py
+# Rev REv BA - production_AW_full.py
 import io
 import base64
 import json
@@ -4112,8 +4112,33 @@ def weekly_render_active_orders_inline(board_df: pd.DataFrame) -> pd.DataFrame:
         smart_editor_df = weekly_build_smart_priority_df(board_df)
         smart_editor_df = smart_editor_df[['Priority', 'SO Number', 'Customer', 'Buildable']].copy() if not smart_editor_df.empty else base_editor_df.copy()
 
-        if 'weekly_priority_editor_work_df' not in st.session_state:
-            st.session_state['weekly_priority_editor_work_df'] = base_editor_df.copy()
+        existing_work_df = pd.DataFrame(st.session_state.get('weekly_priority_editor_work_df', pd.DataFrame())).copy()
+        existing_work_df = weekly_normalize_priority_editor_df(existing_work_df) if not existing_work_df.empty else existing_work_df
+
+        base_so_list = base_editor_df['SO Number'].astype(str).tolist()
+        work_so_list = existing_work_df['SO Number'].astype(str).tolist() if not existing_work_df.empty and 'SO Number' in existing_work_df.columns else []
+
+        needs_editor_refresh = (
+            existing_work_df.empty
+            or work_so_list != base_so_list
+            or len(existing_work_df) != len(base_editor_df)
+        )
+
+        if needs_editor_refresh:
+            if existing_work_df.empty or 'SO Number' not in existing_work_df.columns:
+                refreshed_work_df = base_editor_df.copy()
+            else:
+                refreshed_work_df = base_editor_df.merge(
+                    existing_work_df[['SO Number', 'Priority']],
+                    on='SO Number',
+                    how='left',
+                    suffixes=('', '_saved')
+                )
+                if 'Priority_saved' in refreshed_work_df.columns:
+                    refreshed_work_df['Priority'] = pd.to_numeric(refreshed_work_df['Priority_saved'], errors='coerce').fillna(refreshed_work_df['Priority'])
+                    refreshed_work_df = refreshed_work_df.drop(columns=['Priority_saved'])
+                refreshed_work_df = weekly_normalize_priority_editor_df(refreshed_work_df)
+            st.session_state['weekly_priority_editor_work_df'] = refreshed_work_df.copy()
 
         a1, a2, a3 = st.columns([1.2, 1.2, 2.6])
         if a1.button("Suggest Smart Priority", use_container_width=True):
@@ -4477,6 +4502,7 @@ def render_weekly_production_workspace():
                         st.session_state['weekly_prod_df'] = board
                         weekly_save_priority_state_from_board(board)
                         st.success(f'Added {len(new_rows)} row(s) from {so_number}.')
+                        st.rerun()
                     except Exception as exc:
                         st.error(str(exc))
             uploaded_board = a2.file_uploader('Load CSV', type=['csv'], key='weekly_prod_upload', label_visibility='collapsed')
@@ -4487,6 +4513,7 @@ def render_weekly_production_workspace():
                     st.session_state['weekly_prod_df'] = loaded
                     weekly_save_priority_state_from_board(loaded)
                     st.success('Weekly Production CSV loaded.')
+                    st.rerun()
                 except Exception as exc:
                     st.error(f'Could not load CSV: {exc}')
         with right:

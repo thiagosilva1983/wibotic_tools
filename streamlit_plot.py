@@ -1,4 +1,4 @@
-# Rev BA - production_AW_full.py
+# Rev BB - production_AW_full.py
 import io
 import base64
 import json
@@ -3883,6 +3883,12 @@ def weekly_production_reorder_so(df, target_so, direction='up'):
         so_order[i-1], so_order[i] = so_order[i], so_order[i-1]
     elif direction == 'down' and i < len(so_order) - 1:
         so_order[i+1], so_order[i] = so_order[i], so_order[i+1]
+    elif direction == 'top' and i > 0:
+        so_order.pop(i)
+        so_order.insert(0, target_so)
+    elif direction == 'bottom' and i < len(so_order) - 1:
+        so_order.pop(i)
+        so_order.append(target_so)
     else:
         return out
 
@@ -4103,87 +4109,8 @@ def weekly_apply_priority_change_inline(board_df: pd.DataFrame, edited_priority_
 
 def weekly_render_active_orders_inline(board_df: pd.DataFrame) -> pd.DataFrame:
     board_df = weekly_production_normalize_df(board_df)
-    st.markdown("### Smart Priority Assistant")
-    st.caption("Simple start: unique priorities only, with buildable quick view when an SOS inventory result is already loaded.")
-
-    current_editor_df = weekly_build_so_editor_df(board_df).copy()
-    if not current_editor_df.empty:
-        base_editor_df = current_editor_df[['Priority', 'SO Number', 'Customer', 'Buildable']].copy()
-        smart_editor_df = weekly_build_smart_priority_df(board_df)
-        smart_editor_df = smart_editor_df[['Priority', 'SO Number', 'Customer', 'Buildable']].copy() if not smart_editor_df.empty else base_editor_df.copy()
-
-        existing_work_df = pd.DataFrame(st.session_state.get('weekly_priority_editor_work_df', pd.DataFrame())).copy()
-        existing_work_df = weekly_normalize_priority_editor_df(existing_work_df) if not existing_work_df.empty else existing_work_df
-
-        base_so_list = base_editor_df['SO Number'].astype(str).tolist()
-        work_so_list = existing_work_df['SO Number'].astype(str).tolist() if not existing_work_df.empty and 'SO Number' in existing_work_df.columns else []
-
-        needs_editor_refresh = (
-            existing_work_df.empty
-            or work_so_list != base_so_list
-            or len(existing_work_df) != len(base_editor_df)
-        )
-
-        if needs_editor_refresh:
-            if existing_work_df.empty or 'SO Number' not in existing_work_df.columns:
-                refreshed_work_df = base_editor_df.copy()
-            else:
-                refreshed_work_df = base_editor_df.merge(
-                    existing_work_df[['SO Number', 'Priority']],
-                    on='SO Number',
-                    how='left',
-                    suffixes=('', '_saved')
-                )
-                if 'Priority_saved' in refreshed_work_df.columns:
-                    refreshed_work_df['Priority'] = pd.to_numeric(refreshed_work_df['Priority_saved'], errors='coerce').fillna(refreshed_work_df['Priority'])
-                    refreshed_work_df = refreshed_work_df.drop(columns=['Priority_saved'])
-                refreshed_work_df = weekly_normalize_priority_editor_df(refreshed_work_df)
-            st.session_state['weekly_priority_editor_work_df'] = refreshed_work_df.copy()
-
-        a1, a2, a3 = st.columns([1.2, 1.2, 2.6])
-        if a1.button("Suggest Smart Priority", use_container_width=True):
-            st.session_state['weekly_priority_editor_work_df'] = smart_editor_df.copy()
-        if a2.button("Reset Current Order", use_container_width=True):
-            st.session_state['weekly_priority_editor_work_df'] = base_editor_df.copy()
-        a3.caption("Save will always resequence to 1, 2, 3... so duplicated numbers cannot happen.")
-
-        editor_source_df = pd.DataFrame(st.session_state.get('weekly_priority_editor_work_df', base_editor_df)).copy()
-        editor_source_df = weekly_normalize_priority_editor_df(editor_source_df)
-        edited_priority_df = st.data_editor(
-            editor_source_df,
-            use_container_width=True,
-            num_rows="fixed",
-            key="weekly_priority_table_editor",
-            disabled=['SO Number', 'Customer', 'Buildable'],
-            column_config={
-                'Priority': st.column_config.NumberColumn('Priority', min_value=1, step=1),
-                'SO Number': st.column_config.TextColumn('SO Number'),
-                'Customer': st.column_config.TextColumn('Customer'),
-                'Buildable': st.column_config.TextColumn('Buildable'),
-            },
-        )
-
-        if st.button("Save Smart Priority", use_container_width=True):
-            edited_priority_df = weekly_normalize_priority_editor_df(pd.DataFrame(edited_priority_df).copy())
-            st.session_state['weekly_priority_editor_work_df'] = edited_priority_df.copy()
-
-            full_editor_df = weekly_build_so_editor_df(board_df).copy()
-            full_editor_df = full_editor_df.merge(
-                edited_priority_df[['SO Number', 'Priority']],
-                on='SO Number',
-                how='left',
-                suffixes=('', '_new')
-            )
-            if 'Priority_new' in full_editor_df.columns:
-                full_editor_df['Priority'] = pd.to_numeric(full_editor_df['Priority_new'], errors='coerce').fillna(full_editor_df['Priority'])
-                full_editor_df = full_editor_df.drop(columns=['Priority_new'])
-
-            board_df = weekly_apply_so_editor_df(board_df, full_editor_df)
-            st.session_state["weekly_prod_df"] = board_df
-            weekly_save_priority_state_from_board(board_df)
-            st.success("Smart priority saved with unique numbers.")
-
     st.markdown("### Active Open Orders")
+    st.caption("Use the selector above to choose one sales order, then move it Up, Down, Top, or Bottom. The app will always resequence priorities to 1, 2, 3...")
     display_df = weekly_prepare_display_df(board_df)
     if display_df.empty:
         st.info("No rows to show.")
@@ -4507,25 +4434,48 @@ def render_weekly_production_workspace():
     board_df = weekly_production_normalize_df(st.session_state['weekly_prod_df'])
     shipped_df = weekly_production_normalize_df(st.session_state['weekly_shipped_week_df'])
 
-    priority_left, priority_right = st.columns([1.6, 1.4])
-    with priority_left:
-        sales_orders = list(dict.fromkeys([so for so in board_df['SO Number'].astype(str).tolist() if so]))
-        selected_so = st.selectbox(
-            'Sales Order priority',
-            options=sales_orders,
-            index=0 if sales_orders else None,
-            key='weekly_priority_so',
+    reorder_df = weekly_build_so_editor_df(board_df).copy()
+    reorder_options = []
+    reorder_map = {}
+    for _, row in reorder_df.iterrows():
+        so = str(row.get('SO Number', '') or '').strip()
+        if not so:
+            continue
+        pr = int(pd.to_numeric(row.get('Priority', 0), errors='coerce') or 0)
+        customer = str(row.get('Customer', '') or '').strip()
+        label = f"{pr}. {so} | {customer}" if customer else f"{pr}. {so}"
+        reorder_options.append(label)
+        reorder_map[label] = so
+
+    reorder_left, reorder_right = st.columns([2.6, 2.4])
+    with reorder_left:
+        selected_option = st.selectbox(
+            'Select sales order to reorder',
+            options=reorder_options,
+            index=0 if reorder_options else None,
+            key='weekly_priority_so_label',
             placeholder='Select a sales order',
         )
-    with priority_right:
-        b1, b2 = st.columns(2)
-        if b1.button('Move selected SO up', key='weekly_move_up', use_container_width=True, disabled=not selected_so):
+        selected_so = reorder_map.get(selected_option, '') if reorder_options else ''
+    with reorder_right:
+        b1, b2, b3, b4 = st.columns(4)
+        if b1.button('↑ Up', key='weekly_move_up', use_container_width=True, disabled=not selected_so):
             board_df = weekly_production_reorder_so(board_df, selected_so, 'up')
             st.session_state['weekly_prod_df'] = board_df
             weekly_save_priority_state_from_board(board_df)
             st.rerun()
-        if b2.button('Move selected SO down', key='weekly_move_down', use_container_width=True, disabled=not selected_so):
+        if b2.button('↓ Down', key='weekly_move_down', use_container_width=True, disabled=not selected_so):
             board_df = weekly_production_reorder_so(board_df, selected_so, 'down')
+            st.session_state['weekly_prod_df'] = board_df
+            weekly_save_priority_state_from_board(board_df)
+            st.rerun()
+        if b3.button('⇧ Top', key='weekly_move_top', use_container_width=True, disabled=not selected_so):
+            board_df = weekly_production_reorder_so(board_df, selected_so, 'top')
+            st.session_state['weekly_prod_df'] = board_df
+            weekly_save_priority_state_from_board(board_df)
+            st.rerun()
+        if b4.button('⇩ Bottom', key='weekly_move_bottom', use_container_width=True, disabled=not selected_so):
+            board_df = weekly_production_reorder_so(board_df, selected_so, 'bottom')
             st.session_state['weekly_prod_df'] = board_df
             weekly_save_priority_state_from_board(board_df)
             st.rerun()

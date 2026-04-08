@@ -1,4 +1,4 @@
-# Rev BF - production_AW_full.py
+# Rev bg - production_AW_full.py
 import io
 import base64
 import json
@@ -4131,7 +4131,7 @@ def weekly_restore_weekly_board_if_needed(board_df: pd.DataFrame) -> pd.DataFram
 def weekly_render_active_orders_inline(board_df: pd.DataFrame) -> pd.DataFrame:
     board_df = weekly_production_normalize_df(board_df)
     st.markdown("### Active Open Orders")
-    st.caption("Priorities shown below follow the saved order. Use Priority Manager above to stage changes, then save once at the end.")
+    st.caption("Priorities shown below follow the saved order. Use Priority Override above only when you need to manually change the order.")
     display_df = weekly_prepare_display_df(board_df)
     if display_df.empty:
         backup = st.session_state.get('weekly_prod_df_backup', pd.DataFrame())
@@ -4476,28 +4476,61 @@ def render_weekly_production_workspace():
 
     stage_df = st.session_state.get('weekly_priority_stage_df', reorder_df.copy()).copy()
     stage_df = weekly_normalize_priority_editor_df(stage_df)
-    st.markdown('### Priority Manager')
-    st.caption('Reorder sales orders here, then click Save Priority Order once at the end. Changes stay local until you save.')
+    st.markdown('### Priority Override')
+    st.caption('Edit the Priority number directly. If you type a number that already exists, the sales order you changed takes that spot and the others shift automatically when you save.')
+
+    editor_cols = ['Priority', 'Customer', 'SO Number', 'Buildable']
+    editor_df = stage_df[editor_cols].copy() if not stage_df.empty else pd.DataFrame(columns=editor_cols)
+    edited_stage_df = st.data_editor(
+        editor_df,
+        key='weekly_priority_number_editor',
+        use_container_width=True,
+        hide_index=True,
+        disabled=['Customer', 'SO Number', 'Buildable'],
+        column_config={
+            'Priority': st.column_config.NumberColumn('Priority', min_value=1, step=1, format='%d'),
+            'Customer': st.column_config.TextColumn('Customer'),
+            'SO Number': st.column_config.TextColumn('SO Number'),
+            'Buildable': st.column_config.TextColumn('Buildable'),
+        },
+    )
+    if edited_stage_df is None:
+        edited_stage_df = editor_df.copy()
+    edited_stage_df = pd.DataFrame(edited_stage_df).copy()
+    if not edited_stage_df.empty:
+        for extra_col in ['Status', 'Assigned To', 'Blocker', 'Notes', 'Updated By', 'Last Updated At']:
+            if extra_col in stage_df.columns and extra_col not in edited_stage_df.columns:
+                edited_stage_df[extra_col] = stage_df[extra_col].values
+    edited_stage_df = edited_stage_df.reindex(columns=stage_df.columns, fill_value='') if not stage_df.empty else edited_stage_df
+    if not edited_stage_df.empty and not stage_df.empty:
+        dirty_now = not edited_stage_df[editor_cols].equals(stage_df[editor_cols])
+        st.session_state['weekly_priority_stage_df'] = edited_stage_df.copy()
+        st.session_state['weekly_priority_stage_signature'] = current_stage_signature
+        st.session_state['weekly_priority_stage_dirty'] = bool(dirty_now)
+        stage_dirty = bool(dirty_now)
+        stage_df = edited_stage_df.copy()
 
     save_col, discard_col, info_col = st.columns([1.2, 1.2, 4])
-    if save_col.button('Save Priority Order', key='weekly_priority_stage_save', use_container_width=True, disabled=stage_df.empty):
-        ordered_sos = [so for so in stage_df['SO Number'].fillna('').astype(str).tolist() if str(so).strip()]
+    if save_col.button('Apply Priority Change', key='weekly_priority_stage_save', use_container_width=True, disabled=stage_df.empty):
         if board_df.empty:
             board_df = weekly_restore_weekly_board_if_needed(board_df)
         if board_df.empty:
-            st.error('Cannot save priority order because the active board is empty.')
+            st.error('Cannot apply priority change because the active board is empty.')
         else:
-            if not ordered_sos:
-                ordered_sos = list(dict.fromkeys(board_df['SO Number'].fillna('').astype(str).tolist()))
-            board_df = weekly_production_reset_priorities(board_df, ordered_sos)
+            board_df = weekly_apply_priority_change_inline(board_df, stage_df, save_changes=True)
+            board_df = weekly_restore_weekly_board_if_needed(board_df)
             st.session_state['weekly_prod_df'] = board_df
             weekly_backup_weekly_board(board_df)
-            weekly_save_priority_state_from_board(board_df)
+            if weekly_gsheet_configured():
+                try:
+                    weekly_gsheet_write_pretty_view(board_df)
+                except Exception:
+                    pass
             fresh_df = weekly_build_so_editor_df(board_df).copy()
             st.session_state['weekly_priority_stage_df'] = fresh_df
             st.session_state['weekly_priority_stage_signature'] = '|'.join(fresh_df['SO Number'].fillna('').astype(str).tolist()) if not fresh_df.empty else ''
             st.session_state['weekly_priority_stage_dirty'] = False
-            st.success('Priority order saved.')
+            st.success('Priority updated.')
             st.rerun()
     if discard_col.button('Discard Changes', key='weekly_priority_stage_discard', use_container_width=True, disabled=not stage_dirty):
         fresh_df = weekly_build_so_editor_df(board_df).copy()
@@ -4509,44 +4542,6 @@ def render_weekly_production_workspace():
         info_col.warning('Unsaved priority changes.')
     else:
         info_col.info('Saved order is up to date.')
-
-    action_headers = st.columns([0.8, 2.1, 2.2, 1.0, 0.9, 0.9, 0.9, 1.1])
-    headers = ['Priority', 'Customer', 'SO Number', 'Buildable', 'Up', 'Down', 'Top', 'Bottom']
-    for col, label in zip(action_headers, headers):
-        col.markdown(f'**{label}**')
-
-    visible_stage_df = stage_df.reset_index(drop=True)
-    for idx, row in visible_stage_df.iterrows():
-        so = str(row.get('SO Number', '') or '').strip()
-        customer = str(row.get('Customer', '') or '').strip()
-        buildable = str(row.get('Buildable', '—') or '—')
-        priority = int(pd.to_numeric(row.get('Priority', idx + 1), errors='coerce') or (idx + 1))
-        cols = st.columns([0.8, 2.1, 2.2, 1.0, 0.9, 0.9, 0.9, 1.1])
-        cols[0].markdown(str(priority))
-        cols[1].markdown(customer if customer else '—')
-        cols[2].markdown(so if so else '—')
-        cols[3].markdown(buildable if buildable else '—')
-
-        def _apply_stage_move(direction: str, row_so: str = so):
-            temp_df = st.session_state.get('weekly_priority_stage_df', reorder_df.copy()).copy()
-            temp_df = weekly_production_reorder_so(temp_df, row_so, direction)
-            temp_df = weekly_normalize_priority_editor_df(temp_df)
-            st.session_state['weekly_priority_stage_df'] = temp_df
-            st.session_state['weekly_priority_stage_signature'] = '|'.join(temp_df['SO Number'].fillna('').astype(str).tolist()) if not temp_df.empty else ''
-            st.session_state['weekly_priority_stage_dirty'] = True
-
-        if cols[4].button('↑', key=f'weekly_stage_up_{so}', use_container_width=True, disabled=(idx == 0)):
-            _apply_stage_move('up')
-            st.rerun()
-        if cols[5].button('↓', key=f'weekly_stage_down_{so}', use_container_width=True, disabled=(idx >= len(visible_stage_df) - 1)):
-            _apply_stage_move('down')
-            st.rerun()
-        if cols[6].button('⇧', key=f'weekly_stage_top_{so}', use_container_width=True, disabled=(idx == 0)):
-            _apply_stage_move('top')
-            st.rerun()
-        if cols[7].button('⇩', key=f'weekly_stage_bottom_{so}', use_container_width=True, disabled=(idx >= len(visible_stage_df) - 1)):
-            _apply_stage_move('bottom')
-            st.rerun()
 
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric('Open Sales Orders', int(board_df['SO Number'].astype(str).nunique()) if not board_df.empty else 0)

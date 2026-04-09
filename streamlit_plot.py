@@ -1,4 +1,4 @@
-# Rev bg - production_AW_full.py
+# version BI- production_AW_full.py
 import io
 import base64
 import json
@@ -4233,6 +4233,13 @@ def render_weekly_production_workspace():
     st.caption('Live weekly production board from SOS. Priority is per sales order, item lines are grouped underneath, and shipped rows are highlighted green.')
     st.caption('Use the full SOS Inventory workspace for detailed inventory investigation and deep sales-order checks.')
     st.caption('Weekly Production now prefers manual refresh for stability while you edit priorities.')
+
+    misc_tools_url = str(st.secrets.get('MISC_TOOLS_URL', 'https://wiboticmisctools.streamlit.app')).strip()
+    nav_c1, nav_c2 = st.columns([1, 3])
+    with nav_c1:
+        st.link_button('Open Misc Tools', misc_tools_url, use_container_width=True)
+    with nav_c2:
+        st.caption('Open the separate Misc Tools app for the smaller utilities and non-production tools.')
 
     st.caption(f"Workflow state backend: {weekly_gsheet_backend_name()}")
     if st.session_state.get("weekly_is_refreshing", False):

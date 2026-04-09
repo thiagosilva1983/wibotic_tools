@@ -1,4 +1,4 @@
-# version BI- production_AW_full.py
+# Rev AW - production_AW_full.py
 import io
 import base64
 import json
@@ -4234,7 +4234,7 @@ def render_weekly_production_workspace():
     st.caption('Use the full SOS Inventory workspace for detailed inventory investigation and deep sales-order checks.')
     st.caption('Weekly Production now prefers manual refresh for stability while you edit priorities.')
 
-    misc_tools_url = str(st.secrets.get('MISC_TOOLS_URL', 'https://wiboticmisctools.streamlit.app')).strip()
+    misc_tools_url = str(st.secrets.get('MISC_TOOLS_URL', 'https://misctools-lhmvuc9atxsc4mibegrhnu.streamlit.app/')).strip()
     nav_c1, nav_c2 = st.columns([1, 3])
     with nav_c1:
         st.link_button('Open Misc Tools', misc_tools_url, use_container_width=True)

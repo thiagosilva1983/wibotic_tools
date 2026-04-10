@@ -4958,9 +4958,16 @@ def render_box_build_workspace():
                 candidates = _boxbuild_candidates_from_shipment_detail(detail)
                 st.caption(f'Found {len(candidates)} serial or MAC candidate(s) in the selected shipment.')
                 if candidates:
-                    STCODEPLACEHOLDER
+                    chosen_candidates = st.multiselect(
+                        'Serial / MAC found in shipment',
+                        options=candidates,
+                        default=candidates,
+                        key='boxbuild_shipment_candidates',
+                        help='Select one or more serial numbers or MAC addresses from this shipment to search in Box Build.',
+                    )
+                    search_values = chosen_candidates
                 if st.button('Search selected shipment in Box Build', key='boxbuild_shipment_search_btn', use_container_width=True):
-                    search_values = candidates
+                    search_values = st.session_state.get('boxbuild_shipment_candidates', candidates)
 
     if not search_values:
         return
@@ -5012,12 +5019,11 @@ def render_box_build_workspace():
                 st.download_button('Download Box Build PDF', data=pdf_bytes, file_name=pdfs[0].name, mime='application/pdf', use_container_width=True)
 
 def render_workspace_selector():
-    options = ['Home', 'Label Studio', 'Box Build Report', 'SOS Inventory', 'Weekly Production']
-    default_workspace = st.session_state.get('active_workspace', 'Home')
+    options = ['Label Studio', 'SOS Inventory', 'Weekly Production']
     selected = st.radio(
         'Workspace',
         options,
-        index=options.index(default_workspace) if default_workspace in options else 0,
+        index=options.index(st.session_state.get('active_workspace', 'Weekly Production')) if st.session_state.get('active_workspace', 'Weekly Production') in options else 0,
         horizontal=True,
         key='active_workspace',
         label_visibility='collapsed',

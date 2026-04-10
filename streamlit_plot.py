@@ -4885,7 +4885,7 @@ def _boxbuild_render_record(record):
         st.json(record)
 
 
-def _boxbuild_candidates_from_shipment_detail(detail):
+def def _boxbuild_candidates_from_shipment_detail(detail):     candidates = []     seen = set()      for line in SOSReadonlyClient.extract_shipment_lines(detail):         item_obj = line.get('item') or {}          item_number = str(             item_obj.get('name')             or item_obj.get('fullname')             or line.get('itemName')             or line.get('name')             or ''         ).strip()          description = str(             line.get('description')             or item_obj.get('description')             or line.get('itemDescription')             or line.get('memo')             or ''         ).strip()          product_name = description or item_number          for token in _extract_serials_from_shipment_line(line):             token_up = str(token).strip().upper()             if not token_up:                 continue              dedupe_key = (product_name, item_number, token_up)             if dedupe_key in seen:                 continue             seen.add(dedupe_key)              label_parts = []             if product_name:                 label_parts.append(product_name)             if item_number:                 label_parts.append(item_number)             label_parts.append(token_up)              candidates.append({                 'label': ' | '.join(label_parts),                 'value': token_up,                 'product': product_name,                 'item': item_number,             })      return candidates:
     candidates = []
     seen = set()
 

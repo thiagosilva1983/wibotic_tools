@@ -4580,10 +4580,12 @@ def render_weekly_production_workspace():
         with container:
             st.markdown('## SO inventory check')
             st.caption('Keep the inventory side wide when you want to inspect the live SOS result in detail.')
+            default_inventory_so = sales_orders[0] if sales_orders else ''
+
             inventory_so_number_local = st.selectbox(
                 'Sales order',
                 options=sales_orders,
-                index=sales_orders.index(default_inventory_so) if default_inventory_so in sales_orders else 0,
+                index=sales_orders.index(default_inventory_so) if (default_inventory_so and default_inventory_so in sales_orders) else 0,
                 key='weekly_inventory_so',
                 disabled=not sales_orders,
                 placeholder='Select a sales order',
@@ -5010,11 +5012,12 @@ def render_box_build_workspace():
                 st.download_button('Download Box Build PDF', data=pdf_bytes, file_name=pdfs[0].name, mime='application/pdf', use_container_width=True)
 
 def render_workspace_selector():
-    options = ['Label Studio', 'SOS Inventory', 'Weekly Production']
+    options = ['Home', 'Label Studio', 'Box Build Report', 'SOS Inventory', 'Weekly Production']
+    default_workspace = st.session_state.get('active_workspace', 'Home')
     selected = st.radio(
         'Workspace',
         options,
-        index=options.index(st.session_state.get('active_workspace', 'Weekly Production')) if st.session_state.get('active_workspace', 'Weekly Production') in options else 0,
+        index=options.index(default_workspace) if default_workspace in options else 0,
         horizontal=True,
         key='active_workspace',
         label_visibility='collapsed',

@@ -45,7 +45,7 @@ except Exception:
     Credentials = None
     GSPREAD_AVAILABLE = False
 
-st.set_page_config(page_title='Wibotic Weekly Production | SOS Inventory | Label Studio', layout='wide')
+st.set_page_config(page_title='WiBotic Production | Label Studio | Box Build Report', layout='wide')
 
 st.markdown("""
 <style>
@@ -4234,13 +4234,6 @@ def render_weekly_production_workspace():
     st.caption('Use the full SOS Inventory workspace for detailed inventory investigation and deep sales-order checks.')
     st.caption('Weekly Production now prefers manual refresh for stability while you edit priorities.')
 
-    misc_tools_url = str(st.secrets.get('MISC_TOOLS_URL', 'https://misctools-lhmvuc9atxsc4mibegrhnu.streamlit.app/')).strip()
-    nav_c1, nav_c2 = st.columns([1, 3])
-    with nav_c1:
-        st.link_button('Open Misc Tools', misc_tools_url, use_container_width=True)
-    with nav_c2:
-        st.caption('Open the separate Misc Tools app for the smaller utilities and non-production tools.')
-
     st.caption(f"Workflow state backend: {weekly_gsheet_backend_name()}")
     if st.session_state.get("weekly_is_refreshing", False):
         st.warning("Weekly board is updating from SOS...")
@@ -4747,6 +4740,275 @@ def render_weekly_production_workspace():
 
 
 
+
+
+def render_home_workspace():
+    st.markdown("### Home")
+    st.caption("Quick launch for production workflows and engineering tools.")
+    misc_tools_url = str(st.secrets.get('MISC_TOOLS_URL', 'https://misctools-lhmvuc9atxsc4mibegrhnu.streamlit.app/')).strip()
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.link_button('Open Misc Tools', misc_tools_url, use_container_width=True)
+        st.caption('RF tools, plot tools, derate summary, and Arduino sync.')
+    with c2:
+        if st.button('Open Label Studio', key='home_open_label', use_container_width=True):
+            st.session_state['active_workspace'] = 'Label Studio'
+            st.rerun()
+        st.caption('Fetch shipments from SOS and generate customer labels.')
+    with c3:
+        if st.button('Open Box Build Report', key='home_open_boxbuild', use_container_width=True):
+            st.session_state['active_workspace'] = 'Box Build Report'
+            st.rerun()
+        st.caption('Search Box Build records by serial, MAC, or sales order shipment serials.')
+
+    c4, c5 = st.columns(2)
+    with c4:
+        if st.button('Open SOS Inventory', key='home_open_sos', use_container_width=True):
+            st.session_state['active_workspace'] = 'SOS Inventory'
+            st.rerun()
+    with c5:
+        if st.button('Open Weekly Production', key='home_open_weekly', use_container_width=True):
+            st.session_state['active_workspace'] = 'Weekly Production'
+            st.rerun()
+
+
+@st.cache_resource(show_spinner=False)
+def _load_box_build_module_main():
+    import importlib.util
+    here = Path(__file__).resolve().parent
+    candidates = [
+        here / 'bb_report.py',
+        Path.cwd() / 'bb_report.py',
+    ]
+    module_path = next((c for c in candidates if c.exists() and c.is_file()), None)
+    if module_path is None:
+        searched = "\n".join(str(c) for c in candidates)
+        raise FileNotFoundError(f"Could not find bb_report.py. Put it beside streamlit_plot.py. Searched:\n{searched}")
+    spec = importlib.util.spec_from_file_location('bb_report_module_main', module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f'Could not load module spec for {module_path}')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _boxbuild_summary_rows(records):
+    rows = []
+    for idx, rec in enumerate(records):
+        cfg = rec.get('config') or {}
+        ids = cfg.get('ids') or {}
+        rows.append({
+            'row': idx,
+            'create_time': rec.get('create_time', ''),
+            'time': rec.get('time', ''),
+            'result': 'Passed' if rec.get('passed') else 'Failed',
+            'procedure': cfg.get('procedure_name', ''),
+            'model': ids.get('mn', ''),
+            'serial': rec.get('serial', ''),
+            'mac': rec.get('mac', '') or rec.get('oc_mac', ''),
+        })
+    return pd.DataFrame(rows)
+
+
+def _boxbuild_extract_chart_frames(record):
+    frames = {}
+    for key, blob in (record or {}).items():
+        if not str(key).startswith('datalog_') or not isinstance(blob, dict):
+            continue
+        for device, csv_text in blob.items():
+            if not isinstance(csv_text, str):
+                continue
+            try:
+                df = pd.read_csv(io.StringIO(csv_text))
+            except Exception:
+                continue
+            for col in df.columns:
+                try:
+                    converted = pd.to_numeric(df[col], errors='coerce')
+                    if converted.notna().any():
+                        df[col] = converted
+                except Exception:
+                    pass
+            frames[f'{key}:{device}'] = df
+    return frames
+
+
+def _boxbuild_render_record(record):
+    cfg = record.get('config') or {}
+    ids = cfg.get('ids') or {}
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric('Result', 'Passed' if record.get('passed') else 'Failed')
+    m2.metric('Model', str(ids.get('mn', '') or ''))
+    m3.metric('Serial', str(record.get('serial', '') or ''))
+    m4.metric('MAC', str(record.get('mac', '') or record.get('oc_mac', '') or ''))
+    st.caption(f"Procedure: {cfg.get('procedure_name', '')} | Record time: {record.get('time', '')}")
+
+    tc = record.get('tolerance_checks') or {}
+    if tc:
+        tc_rows = []
+        for name, vals in tc.items():
+            if isinstance(vals, dict):
+                tc_rows.append({
+                    'Check': name,
+                    'Low': vals.get('lower_limit', ''),
+                    'High': vals.get('upper_limit', ''),
+                    'Actual': vals.get('actual', ''),
+                    'Result': 'Pass' if vals.get('pass') else 'Fail',
+                })
+        if tc_rows:
+            with st.expander('Tolerance checks', expanded=True):
+                st.dataframe(pd.DataFrame(tc_rows), use_container_width=True, hide_index=True, height=260)
+
+    prompts = record.get('pass_fail_prompts') or {}
+    if prompts:
+        pf_rows = [{'Prompt': k, 'Result': 'Pass' if bool(v) else 'Fail'} for k, v in prompts.items()]
+        with st.expander('Manual checks', expanded=False):
+            st.dataframe(pd.DataFrame(pf_rows), use_container_width=True, hide_index=True, height=220)
+
+    frames = _boxbuild_extract_chart_frames(record)
+    if frames:
+        with st.expander('Charts', expanded=False):
+            for name, df in frames.items():
+                st.markdown(f'**{name}**')
+                numeric_cols = [c for c in df.columns if pd.to_numeric(df[c], errors='coerce').notna().any()]
+                x_col = 'Timestamp' if 'Timestamp' in df.columns else (numeric_cols[0] if numeric_cols else None)
+                y_cols = [c for c in numeric_cols if c != x_col][:4]
+                if x_col and y_cols:
+                    chart_df = df[[x_col] + y_cols].copy().dropna(how='all')
+                    st.line_chart(chart_df.set_index(x_col), height=260)
+                with st.expander(f'Preview {name}', expanded=False):
+                    st.dataframe(df.head(200), use_container_width=True, height=220)
+
+    with st.expander('Raw record JSON', expanded=False):
+        st.json(record)
+
+
+def _boxbuild_candidates_from_shipment_detail(detail):
+    candidates = []
+    seen = set()
+    for line in SOSReadonlyClient.extract_shipment_lines(detail):
+        for token in _extract_serials_from_shipment_line(line):
+            token_up = str(token).strip().upper()
+            if token_up and token_up not in seen:
+                seen.add(token_up)
+                candidates.append(token_up)
+    return candidates
+
+
+def render_box_build_workspace():
+    st.subheader('Box Build Report')
+    st.caption('Search Box Build by serial number, MAC address, or shipment serials from SOS, preview a record, and generate the original PDF report.')
+    try:
+        bb = _load_box_build_module_main()
+    except Exception as exc:
+        st.error(str(exc))
+        return
+
+    auth_url = sos_build_auth_url()
+    try:
+        client, status_text = sos_get_authenticated_client()
+    except Exception as exc:
+        client, status_text = None, str(exc)
+
+    mode = st.radio('Search source', ['Serial or MAC', 'Sales Order shipment'], horizontal=True, key='boxbuild_mode_main')
+
+    search_values = []
+    if mode == 'Serial or MAC':
+        query = st.text_input('Serial number or MAC address', key='boxbuild_direct_query').strip().upper()
+        if st.button('Search Box Build', key='boxbuild_direct_btn', use_container_width=True):
+            if query:
+                search_values = [query]
+    else:
+        c1, c2 = st.columns([1.8, 1.0])
+        so_number = c1.text_input('Sales Order number', key='boxbuild_so_number', placeholder='SO-2026-160').strip()
+        fetch_ship = c2.button('Fetch shipment serials', key='boxbuild_fetch_so', use_container_width=True)
+        if fetch_ship:
+            if client is None:
+                st.error(f'SOS client is not available. {status_text}')
+            elif not so_number:
+                st.warning('Type a Sales Order number first.')
+            else:
+                with st.spinner(f'Fetching shipments for {so_number}...'):
+                    shipments = client.get_shipments_for_sales_order(so_number, maxresults=50)
+                options = []
+                detail_map = {}
+                for sh in shipments:
+                    sh_id = sh.get('id')
+                    if not sh_id:
+                        continue
+                    detail = client.get_shipment_detail(int(sh_id))
+                    label = _shipment_display_label(detail, fallback_number=str(sh.get('number') or ''), fallback_date=str(sh.get('date') or ''), fallback_status=str(sh.get('status') or ''), fallback_tracking=str(sh.get('trackingNumber') or ''))
+                    options.append(label)
+                    detail_map[label] = detail
+                st.session_state['boxbuild_shipment_options'] = options
+                st.session_state['boxbuild_shipment_detail_map'] = detail_map
+                if len(options) == 1:
+                    st.session_state['boxbuild_shipment_selected'] = options[0]
+                elif not options:
+                    st.warning('No shipments found for that Sales Order.')
+
+        options = st.session_state.get('boxbuild_shipment_options') or []
+        if options:
+            selected = st.selectbox('Shipment', options, key='boxbuild_shipment_selected')
+            detail_map = st.session_state.get('boxbuild_shipment_detail_map') or {}
+            detail = detail_map.get(selected)
+            if detail:
+                candidates = _boxbuild_candidates_from_shipment_detail(detail)
+                st.caption(f'Found {len(candidates)} serial or MAC candidate(s) in the selected shipment.')
+                if candidates:
+                    STCODEPLACEHOLDER
+                if st.button('Search selected shipment in Box Build', key='boxbuild_shipment_search_btn', use_container_width=True):
+                    search_values = candidates
+
+    if not search_values:
+        return
+
+    db_choice = st.selectbox('Database', ['Production', 'Development'], index=0, key='boxbuild_db_choice_main')
+    db_enum = bb.DatabaseName.PRODUCTION if db_choice == 'Production' else bb.DatabaseName.DEVELOPMENT
+
+    all_records = []
+    with st.spinner('Searching Box Build database...'):
+        table = bb.get_db_table(db_enum)
+        for value in search_values:
+            parsed, input_type = bb.detect_serial_or_mac(str(value).strip().upper())
+            if input_type == bb.InputType.UNKNOWN or not parsed:
+                continue
+            records = bb.get_item_list_from_serial_or_mac(db_enum, table, parsed, input_type) or []
+            for rec in records:
+                rec['_searched_value'] = value
+            all_records.extend(records)
+
+    if not all_records:
+        st.warning('No Box Build records found.')
+        return
+
+    # de-duplicate records
+    deduped = []
+    seen = set()
+    for rec in all_records:
+        key = (str(rec.get('create_time') or ''), str(rec.get('serial') or ''), str(rec.get('mac') or rec.get('oc_mac') or ''))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(rec)
+
+    summary_df = _boxbuild_summary_rows(deduped).sort_values(['create_time', 'serial'], ascending=[False, True]).reset_index(drop=True)
+    st.dataframe(summary_df.drop(columns=['row']), use_container_width=True, hide_index=True, height=280)
+    selected_row = st.selectbox('Record to preview', list(summary_df.index), format_func=lambda i: f"{summary_df.loc[i, 'result']} | {summary_df.loc[i, 'serial']} | {summary_df.loc[i, 'procedure']} | {summary_df.loc[i, 'time']}", key='boxbuild_selected_row_main')
+    record = deduped[int(summary_df.loc[selected_row, 'row'])]
+    _boxbuild_render_record(record)
+
+    if st.button('Generate PDF report', key='boxbuild_generate_pdf_main', use_container_width=True):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            searched_value = str(record.get('_searched_value') or record.get('serial') or record.get('mac') or record.get('oc_mac') or 'boxbuild')
+            bb.create_report(deduped, searched_value, int(summary_df.loc[selected_row, 'row']), tmp_path)
+            pdfs = sorted(tmp_path.glob('*.pdf'))
+            if not pdfs:
+                st.error('No PDF report was generated for this record.')
+            else:
+                pdf_bytes = pdfs[0].read_bytes()
+                st.download_button('Download Box Build PDF', data=pdf_bytes, file_name=pdfs[0].name, mime='application/pdf', use_container_width=True)
+
 def render_workspace_selector():
     options = ['Label Studio', 'SOS Inventory', 'Weekly Production']
     selected = st.radio(
@@ -4945,7 +5207,7 @@ def _workspace_intro(title, description=''):
 
 def render_app_header():
     st.markdown("## WiBotic Production")
-    st.caption("Weekly Production, SOS Inventory, and Label Studio in one Streamlit app.")
+    st.caption("Home, Weekly Production, SOS Inventory, Label Studio, and Box Build Report in one Streamlit app.")
 
 
 # -----------------------------
@@ -5541,8 +5803,12 @@ inject_branding()
 render_app_header()
 active_workspace = render_workspace_selector()
 
-if active_workspace == 'Label Studio':
+if active_workspace == 'Home':
+    render_home_workspace()
+elif active_workspace == 'Label Studio':
     render_label_tab()
+elif active_workspace == 'Box Build Report':
+    render_box_build_workspace()
 elif active_workspace == 'SOS Inventory':
     render_sos_workspace()
 else:

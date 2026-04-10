@@ -4889,68 +4889,34 @@ def _boxbuild_candidates_from_shipment_detail(detail):
     candidates = []
     seen = set()
 
-    def _best_product_name(line: Dict[str, Any]) -> str:
+    def _model_from_line(line: Dict[str, Any]) -> str:
         item_obj = line.get('item') or {}
-        item_code = str(
-            item_obj.get('name')
-            or item_obj.get('fullname')
-            or line.get('itemName')
-            or line.get('name')
-            or ''
-        ).strip()
-
-        description = str(
-            line.get('description')
-            or line.get('itemDescription')
-            or item_obj.get('description')
-            or line.get('memo')
-            or ''
-        ).strip()
-
+        item_name = str(item_obj.get('name') or item_obj.get('fullname') or line.get('itemName') or line.get('name') or '').strip()
+        description = str(line.get('description') or item_obj.get('description') or line.get('itemDescription') or line.get('memo') or '').strip()
         model_match = re.search(r'MN\s*:\s*([A-Z0-9\-]+)', description, flags=re.IGNORECASE)
-        if model_match:
-            return model_match.group(1).strip()
-
-        if description:
-            first_line = description.splitlines()[0].strip()
-            return first_line or item_code
-
-        return item_code
+        model = model_match.group(1).strip() if model_match else ''
+        return model or item_name
 
     for line in SOSReadonlyClient.extract_shipment_lines(detail):
+        product_name = _model_from_line(line)
         item_obj = line.get('item') or {}
-        item_number = str(
-            item_obj.get('name')
-            or item_obj.get('fullname')
-            or line.get('itemName')
-            or line.get('name')
-            or ''
-        ).strip()
-        product_name = _best_product_name(line)
-
+        item_number = str(item_obj.get('name') or item_obj.get('fullname') or line.get('itemName') or line.get('name') or '').strip()
         for token in _extract_serials_from_shipment_line(line):
             token_up = str(token).strip().upper()
-            if not token_up:
-                continue
-
-            dedupe_key = (product_name, item_number, token_up)
-            if dedupe_key in seen:
-                continue
-            seen.add(dedupe_key)
-
-            label_parts = []
-            if product_name:
-                label_parts.append(product_name)
-            if item_number and item_number != product_name:
-                label_parts.append(item_number)
-            label_parts.append(token_up)
-
-            candidates.append({
-                'label': ' | '.join(label_parts),
-                'value': token_up,
-                'product': product_name,
-                'item': item_number,
-            })
+            if token_up and token_up not in seen:
+                seen.add(token_up)
+                label_parts = []
+                if product_name:
+                    label_parts.append(product_name)
+                if item_number and item_number != product_name:
+                    label_parts.append(item_number)
+                label_parts.append(token_up)
+                candidates.append({
+                    'label': ' | '.join(label_parts),
+                    'value': token_up,
+                    'product': product_name,
+                    'item': item_number,
+                })
     return candidates
 
 
@@ -5079,34 +5045,28 @@ def render_box_build_workspace():
     _boxbuild_render_record(record)
 
     if st.button('Generate PDF report', key='boxbuild_generate_pdf_main', use_container_width=True):
-        try:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                tmp_path = Path(tmpdir)
-                searched_value = str(record.get('_searched_value') or record.get('serial') or record.get('mac') or record.get('oc_mac') or 'boxbuild')
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            searched_value = str(record.get('_searched_value') or record.get('serial') or record.get('mac') or record.get('oc_mac') or 'boxbuild')
+            try:
                 original_input = None
-                try:
-                    import builtins as _builtins
-                    if not record.get('passed'):
-                        original_input = _builtins.input
-                        _builtins.input = lambda prompt='': 'Y'
-                    bb.create_report(deduped, searched_value, int(summary_df.loc[selected_row, 'row']), tmp_path)
-                finally:
-                    if original_input is not None:
-                        _builtins.input = original_input
-
-                pdfs = sorted(tmp_path.glob('*.pdf'))
-                if not pdfs:
-                    st.error('No PDF report was generated for this record.')
-                    st.session_state.pop('boxbuild_pdf_bytes', None)
-                    st.session_state.pop('boxbuild_pdf_name', None)
-                else:
-                    st.session_state['boxbuild_pdf_bytes'] = pdfs[0].read_bytes()
-                    st.session_state['boxbuild_pdf_name'] = pdfs[0].name
-                    st.success(f'PDF ready: {pdfs[0].name}')
-        except Exception as exc:
-            st.session_state.pop('boxbuild_pdf_bytes', None)
-            st.session_state.pop('boxbuild_pdf_name', None)
-            st.error(f'Failed to generate PDF: {exc}')
+                import builtins as _builtins
+                if not record.get('passed'):
+                    original_input = _builtins.input
+                    _builtins.input = lambda prompt='': 'Y'
+                bb.create_report(deduped, searched_value, int(summary_df.loc[selected_row, 'row']), tmp_path)
+            finally:
+                if original_input is not None:
+                    _builtins.input = original_input
+            pdfs = sorted(tmp_path.glob('*.pdf'))
+            if not pdfs:
+                st.error('No PDF report was generated for this record.')
+                st.session_state.pop('boxbuild_pdf_bytes', None)
+                st.session_state.pop('boxbuild_pdf_name', None)
+            else:
+                st.session_state['boxbuild_pdf_bytes'] = pdfs[0].read_bytes()
+                st.session_state['boxbuild_pdf_name'] = pdfs[0].name
+                st.success(f'PDF ready: {pdfs[0].name}')
 
     if st.session_state.get('boxbuild_pdf_bytes'):
         st.download_button(
@@ -5116,6 +5076,112 @@ def render_box_build_workspace():
             mime='application/pdf',
             use_container_width=True,
             key='boxbuild_download_pdf_main',
+        )
+
+def render_workspace_selector():
+    options = ['Home', 'Label Studio', 'Box Build Report', 'SOS Inventory', 'Weekly Production']
+    default_workspace = st.session_state.get('active_workspace', 'Home')
+    selected = st.radio(
+        'Workspace',
+        options,
+        index=options.index(default_workspace) if default_workspace in options else 0,
+        horizontal=True,
+        key='active_workspace',
+        label_visibility='collapsed',
+    )
+    return selected
+
+
+
+
+def render_label_tab():
+    st.subheader('Label')
+    st.caption('Choose a customer label pattern, edit the layout on the left, and review the live preview on the right before exporting the PDF.')
+    tab_nab, tab_jabil = st.tabs(['Nabtesco', 'Jabil'])
+    with tab_nab:
+        render_nabtesco_editor()
+    with tab_jabil:
+        render_jabil_editor()
+
+def render_plot_tab():
+    st.subheader('Plot')
+    st.caption('Use TAR file from Wibotic Transmitter log.')
+
+    left, right = st.columns([1.05, 1.35])
+
+    with left:
+        plot_file = st.file_uploader('Plot CSV/TAR', type=['csv', 'tar'], key='plot_file')
+        plot_suffix = None
+        if plot_file is not None and plot_file.name.lower().endswith('.tar'):
+            try:
+                plot_suffix_options = sorted([s for s, entry in scan_tar_bytes(plot_file.getvalue()).items() if 'RX' in entry and 'TX' in entry])
+                plot_suffix = st.selectbox('RX/TX pair', plot_suffix_options, index=0, key='plot_suffix')
+            except Exception as e:
+                st.error(f'Could not inspect TAR: {e}')
+
+        plot_title = st.text_input('Plot title', value='Data Plot', key='plot_title_input')
+        signal_filter = st.text_input('Signal filter', value='', key='plot_signal_filter').strip().lower()
+
+        c1, c2 = st.columns(2)
+        smoothing_mode = c1.selectbox('Smoothing', ['None', 'Moving Average', 'Median', 'EMA'], index=0, key='plot_smoothing')
+        x_axis_mode = c2.selectbox('X axis', ['Seconds', 'Minutes', 'Hours', 'Sample Index'], index=0, key='plot_xaxis')
+
+        c3, c4 = st.columns(2)
+        smoothing_window = c3.number_input('Window', min_value=1, value=5, step=1, key='plot_window')
+        ignore_seconds = c4.number_input('Ignore first sec', min_value=0.0, value=60.0, step=10.0, key='plot_ignore')
+
+    prepared_df = None
+    source_caption = None
+    all_plot_cols = []
+
+    if plot_file is not None:
+        try:
+            raw_df, source_type, chosen_suffix = read_source_uploaded(plot_file, plot_suffix)
+            prepared_df = prepare_loaded_dataframe(raw_df)
+            all_plot_cols = get_plot_columns(prepared_df)
+            source_caption = f"Loaded {plot_file.name} | source={source_type}" + (f" | pair={chosen_suffix}" if chosen_suffix else '')
+            st.caption(source_caption)
+        except Exception as e:
+            st.error(f'Failed to load plot file: {e}')
+
+    with right:
+        if prepared_df is None:
+            st.info('Upload a CSV or TAR file to use the Plot tab.')
+            return
+
+        filtered_cols = [c for c in all_plot_cols if signal_filter in c.lower()]
+        if not filtered_cols:
+            st.warning('No numeric signals match the current filter.')
+            return
+
+        st.write('Preset selection')
+        p1, p2, p3, p4, p5, p6, p7 = st.columns(7)
+        if p1.button('Recommended', key='preset_rec'):
+            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Recommended')
+        if p2.button('Temp', key='preset_temp'):
+            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Temp')
+        if p3.button('Voltage', key='preset_volt'):
+            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Voltage')
+        if p4.button('Power', key='preset_power'):
+            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Power')
+        if p5.button('Rx', key='preset_rx'):
+            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Rx')
+        if p6.button('Tx', key='preset_tx'):
+            st.session_state['plot_selected_columns'] = apply_preset(filtered_cols, 'Tx')
+        if p7.button('Clear', key='preset_clear'):
+            st.session_state['plot_selected_columns'] = []
+
+        default_selection = st.session_state.get('plot_selected_columns')
+        valid_default = [c for c in (default_selection or []) if c in filtered_cols]
+        if not valid_default:
+            valid_default = [c for c in apply_preset(filtered_cols, 'Recommended') if c in filtered_cols]
+
+        selected_columns = st.multiselect(
+            'Signals to plot',
+            options=filtered_cols,
+            default=valid_default,
+            format_func=friendly_label,
+            key='plot_selected_columns'
         )
 
         st.write('Scale factors')

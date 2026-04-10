@@ -4888,12 +4888,35 @@ def _boxbuild_render_record(record):
 def _boxbuild_candidates_from_shipment_detail(detail):
     candidates = []
     seen = set()
+
+    def _model_from_line(line: Dict[str, Any]) -> str:
+        item_obj = line.get('item') or {}
+        item_name = str(item_obj.get('name') or item_obj.get('fullname') or line.get('itemName') or line.get('name') or '').strip()
+        description = str(line.get('description') or item_obj.get('description') or line.get('itemDescription') or line.get('memo') or '').strip()
+        model_match = re.search(r'MN\s*:\s*([A-Z0-9\-]+)', description, flags=re.IGNORECASE)
+        model = model_match.group(1).strip() if model_match else ''
+        return model or item_name
+
     for line in SOSReadonlyClient.extract_shipment_lines(detail):
+        product_name = _model_from_line(line)
+        item_obj = line.get('item') or {}
+        item_number = str(item_obj.get('name') or item_obj.get('fullname') or line.get('itemName') or line.get('name') or '').strip()
         for token in _extract_serials_from_shipment_line(line):
             token_up = str(token).strip().upper()
             if token_up and token_up not in seen:
                 seen.add(token_up)
-                candidates.append(token_up)
+                label_parts = []
+                if product_name:
+                    label_parts.append(product_name)
+                if item_number and item_number != product_name:
+                    label_parts.append(item_number)
+                label_parts.append(token_up)
+                candidates.append({
+                    'label': ' | '.join(label_parts),
+                    'value': token_up,
+                    'product': product_name,
+                    'item': item_number,
+                })
     return candidates
 
 
@@ -4957,18 +4980,30 @@ def render_box_build_workspace():
             if detail:
                 candidates = _boxbuild_candidates_from_shipment_detail(detail)
                 st.caption(f'Found {len(candidates)} serial or MAC candidate(s) in the selected shipment.')
+                candidate_values = [c['value'] for c in candidates]
+                candidate_label_map = {c['value']: c['label'] for c in candidates}
                 if candidates:
                     chosen_candidates = st.multiselect(
                         'Serial / MAC found in shipment',
-                        options=candidates,
-                        default=candidates,
+                        options=candidate_values,
+                        default=candidate_values,
                         key='boxbuild_shipment_candidates',
+                        format_func=lambda x: candidate_label_map.get(x, x),
                         help='Select one or more serial numbers or MAC addresses from this shipment to search in Box Build.',
                     )
+                    if chosen_candidates:
+                        preview_rows = [
+                            {
+                                'Product': next((c.get('product','') for c in candidates if c['value'] == v), ''),
+                                'Item': next((c.get('item','') for c in candidates if c['value'] == v), ''),
+                                'Serial / MAC': v,
+                            }
+                            for v in chosen_candidates
+                        ]
+                        st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True, height=min(260, 44 + 35 * len(preview_rows)))
                 else:
                     chosen_candidates = []
                     st.warning('No serial or MAC candidates were found in this shipment.')
-
                 if st.button('Search selected shipment in Box Build', key='boxbuild_shipment_search_btn', use_container_width=True):
                     search_values = chosen_candidates
 
@@ -5013,13 +5048,35 @@ def render_box_build_workspace():
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             searched_value = str(record.get('_searched_value') or record.get('serial') or record.get('mac') or record.get('oc_mac') or 'boxbuild')
-            bb.create_report(deduped, searched_value, int(summary_df.loc[selected_row, 'row']), tmp_path)
+            try:
+                original_input = None
+                import builtins as _builtins
+                if not record.get('passed'):
+                    original_input = _builtins.input
+                    _builtins.input = lambda prompt='': 'Y'
+                bb.create_report(deduped, searched_value, int(summary_df.loc[selected_row, 'row']), tmp_path)
+            finally:
+                if original_input is not None:
+                    _builtins.input = original_input
             pdfs = sorted(tmp_path.glob('*.pdf'))
             if not pdfs:
                 st.error('No PDF report was generated for this record.')
+                st.session_state.pop('boxbuild_pdf_bytes', None)
+                st.session_state.pop('boxbuild_pdf_name', None)
             else:
-                pdf_bytes = pdfs[0].read_bytes()
-                st.download_button('Download Box Build PDF', data=pdf_bytes, file_name=pdfs[0].name, mime='application/pdf', use_container_width=True)
+                st.session_state['boxbuild_pdf_bytes'] = pdfs[0].read_bytes()
+                st.session_state['boxbuild_pdf_name'] = pdfs[0].name
+                st.success(f'PDF ready: {pdfs[0].name}')
+
+    if st.session_state.get('boxbuild_pdf_bytes'):
+        st.download_button(
+            'Download Box Build PDF',
+            data=st.session_state['boxbuild_pdf_bytes'],
+            file_name=st.session_state.get('boxbuild_pdf_name', 'boxbuild_report.pdf'),
+            mime='application/pdf',
+            use_container_width=True,
+            key='boxbuild_download_pdf_main',
+        )
 
 def render_workspace_selector():
     options = ['Home', 'Label Studio', 'Box Build Report', 'SOS Inventory', 'Weekly Production']

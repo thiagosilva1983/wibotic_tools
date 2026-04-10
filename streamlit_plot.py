@@ -4958,9 +4958,19 @@ def render_box_build_workspace():
                 candidates = _boxbuild_candidates_from_shipment_detail(detail)
                 st.caption(f'Found {len(candidates)} serial or MAC candidate(s) in the selected shipment.')
                 if candidates:
-                    STCODEPLACEHOLDER
+                    chosen_candidates = st.multiselect(
+                        'Serial / MAC found in shipment',
+                        options=candidates,
+                        default=candidates,
+                        key='boxbuild_shipment_candidates',
+                        help='Select one or more serial numbers or MAC addresses from this shipment to search in Box Build.',
+                    )
+                else:
+                    chosen_candidates = []
+                    st.warning('No serial or MAC candidates were found in this shipment.')
+
                 if st.button('Search selected shipment in Box Build', key='boxbuild_shipment_search_btn', use_container_width=True):
-                    search_values = candidates
+                    search_values = chosen_candidates
 
     if not search_values:
         return

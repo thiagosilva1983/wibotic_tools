@@ -32,7 +32,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.ticker import FuncFormatter
 import matplotlib.pyplot as plt
 
-import _keys
+import streamlit as st
 
 '''
 Utility to view the Box Build history of an TR or OC and generate a report of power tests that were run.
@@ -479,11 +479,11 @@ def create_report(data: List[Dict], sn_or_mac: str, selection, parent_path):
 def get_db_table(table_name: DatabaseName):
     table_str: str = table_name.value
     dynamodb = boto3.Session(
-        aws_access_key_id=_keys.ACCESS_KEY,
-        aws_secret_access_key=_keys.SECRET_ACCESS_KEY,
+        aws_access_key_id=st.secrets["ACCESS_KEY"],
+        aws_secret_access_key=st.secrets["SECRET_ACCESS_KEY"],
     ).resource(
         "dynamodb",
-        region_name="us-west-2",
+        region_name=st.secrets.get("AWS_REGION", "us-west-2"),
         config=Config(connect_timeout=4, retries={"mode": "standard"}),
     )
     table = dynamodb.Table(table_str)

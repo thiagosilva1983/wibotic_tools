@@ -12,3 +12,6 @@ sqlalchemy
 psycopg2-binary
 python-dotenv
 streamlit-autorefresh
+tzlocal
+boto3
+pytz
